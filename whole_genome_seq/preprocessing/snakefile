@@ -1,0 +1,165 @@
+#!/bin/python
+
+import pandas as pd
+import numpy as np
+import os
+import pdb
+
+# Define parent dir
+parent_dir = os.path.dirname(__file__)
+
+# Define temporary dir 
+temp_dir = parent_dir + "tmp/"
+
+# Give paths to references
+reference_genome = parent_dir + "/genome_files/mm39_n_masked"
+ref_fasta = parent_dir + "/genome_files/n_masked_genome/mm39.removechr.fa"
+chr_sizes = parent_dir + "/genome_files/n_masked_genome_sizes.genome/"
+snp_file = parent_dir + "/genome_files/all_SNPs_CAST_EiJ_GRCm38.txt.gz"
+
+# Output folder
+output_dir = parent_dir + "output/"
+
+# Give the paths to the data files - the data should be placed in this directory
+data_dir = "data/"
+
+# Read the sample information from metadata files
+metadata = pd.read_csv(parent_dir + "metadata.csv")
+
+sample_list = [i for i in metadata.Sample]
+data_path_per_sample = { i : "" }
+
+# Define final targets for rule all
+all_targets = [ output_dir + i + "/aligned/" + i + ".sorted.markdup.resorted.genome1.bam" for i in sample_list ]
+
+rule all:
+    input:
+        expand(output_dir + "{sample}/aligned/{sample}.sorted.markdup.resorted.{genome}.bam", genome = ["genome1",
+            "genome2"], sample = sample_list)
+
+
+
+# Link fastq files
+rule link_file1:
+    output: output_dir + "{sample}/reads/{sample}_R1.fastq.gz"
+    params: 
+        fastq_dir = lambda wildcards: output_dir + wildcards.sample + "/reads/",
+        fastq_input_file = lambda wildcards: parent_dir + "data/wgs/" + data_path_per_sample[wildcards.sample] + "/" + wildcards.sample + "/fastq/" + wildcards.sample + "_R1.fastq.gz"
+    shell:
+        """
+        mkdir -p {params.fastq_dir}
+        ln -sf {params.fastq_input_file} {output}
+        """
+rule link_file2:
+    output: output_dir + "{sample}/reads/{sample}_R2.fastq.gz"
+    params: 
+        fastq_dir = lambda wildcards: output_dir + wildcards.sample + "/reads/",
+        fastq_input_file = lambda wildcards: parent_dir + "data/wgs/" + data_path_per_sample[wildcards.sample] + "/" + wildcards.sample + "/fastq/" + wildcards.sample + "_R2.fastq.gz"
+    shell:
+        """
+        mkdir -p {params.fastq_dir}
+        ln -sf {params.fastq_input_file} {output}
+        """
+
+# Run read trimming using trim_galore
+rule trim_reads:
+    input:
+        read1 = output_dir + "{sample}/reads/{sample}_R1.fastq.gz",
+        read2 = output_dir + "{sample}/reads/{sample}_R2.fastq.gz"
+    output:
+        expand(output_dir + "{{sample}}/trimmed/{{sample}}_R{read}_val_{read}.fq.gz", read=["1", "2"])
+    params:
+        output_dir = output_dir + "{sample}/trimmed/"
+    shell:
+        """
+        mkdir -p {params.output_dir}
+        /omics/groups/OE0538/internal/users/p281o/programs/TrimGalore-0.6.6/trim_galore --paired \
+            --three_prime_clip_R1 1 \
+            --three_prime_clip_R2 1 \
+            --fastqc \
+            --cores 8 \
+            --stringency 3 \
+            -o {params.output_dir} \
+            --path_to_cutadapt /home/panten/miniconda3/bin/cutadapt \
+            {input.read1} {input.read2}
+        """
+
+# Run read alignment using bowtie2
+rule align_reads:
+    input:
+        read1 = output_dir + "{sample}/trimmed/{sample}_R1_val_1.fq.gz",
+        read2 = output_dir + "{sample}/trimmed/{sample}_R2_val_2.fq.gz"
+    output:
+        output_dir + "{sample}/aligned/{sample}.sam"
+    params:
+        aligned_dir = output_dir + "{sample}/aligned/",
+        genome = reference_genome
+    envmodules:
+        "bowtie2/2.3.5.1"
+    shell:
+        """
+        mkdir -p {params.aligned_dir}
+        bowtie2 -p 10 -x {params.genome} -1 {input.read1} -2 {input.read2} -S {output}
+        """
+
+# Process sam output into sorted bam
+rule process_bam:
+    input: output_dir + "{sample}/aligned/{sample}.sam"
+    output: output_dir + "{sample}/aligned/{sample}.sorted.bam"
+    envmodules:
+        "samtools"
+    shell:
+        """
+        samtools sort {input} -o {input}.sorted.bam
+        mv {input}.sorted.bam {output}
+        samtools index {output}
+        """
+
+# Deduplicate using samtools markdup
+rule markdups:
+    input: output_dir + "{sample}/aligned/{sample}.sorted.bam"
+    output: output_dir + "{sample}/aligned/{sample}.sorted.markdup.bam"
+    params:
+        temp_dir = lambda wc: temp_dir + wc.get("sample")
+    envmodules:
+        "samtools/1.15.1"
+    shell:
+        """
+        samtools collate -o {input}.collate {input} {params.temp_dir}
+        samtools fixmate -m {input}.collate {input}.fixmate
+        samtools sort -o {input}.sort {input}.fixmate
+        samtools markdup -r {input}.sort {output}
+        rm {input}.collate
+        rm {input}.fixmate
+        rm {input}.sort
+        samtools index {output}
+        """
+
+# Use SNPsplit to partition reads into B6 and CAST genotypes
+rule snpsplit:
+    input: output_dir + "{sample}/aligned/{sample}.sorted.markdup.bam"
+    output: expand(output_dir + "{{sample}}/aligned/{{sample}}.sorted.markdup.{genotype}.bam", genotype=["genome1", "genome2", "unassigned"])
+    params: 
+        snp_dir = snp_file,
+        split_dir = output_dir + "{sample}/aligned/"
+    envmodules:
+        "samtools/1.15.1"
+    shell:
+        """
+        ~/miniconda3/envs/bulk_allelic_nextflow/bin/SNPsplit \
+            --snp_file {params.snp_dir} \
+            -o {params.split_dir} \
+            {input}
+        """
+
+# Process allelic bams
+rule process_allelic_bam:
+        input: output_dir + "{sample}/aligned/{sample}.sorted.markdup.{genotype}.bam"
+        output: output_dir + "{sample}/aligned/{sample}.sorted.markdup.resorted.{genotype}.bam"
+        envmodules:
+            "samtools/1.15.1"
+        shell:
+            """
+            samtools sort -o {output} {input}
+            samtools index {output}
+            """

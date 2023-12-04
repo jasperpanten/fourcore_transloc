@@ -1,0 +1,660 @@
+---
+title: "fourcore_wgs_analysis"
+output: html_document
+author: "Jasper Panten"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../../"))
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+```{r asdasdas}
+
+setwd(paste0(dirname(rstudioapi::getSourceEditorContext()$path), ""))
+
+library(GenomicRanges)
+library(Rsamtools)
+library(bamsignals)
+library(tidyverse)
+library(bsub)
+
+# define plotting theme
+theme_paper <- function(base_size = 20){
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(colour = "black"),
+        panel.border = element_rect(colour = "black", fill=NA, size=1), 
+        axis.text.x = element_text(color = "black"), 
+        axis.text.y = element_text(color = "black"), 
+        axis.ticks.x = element_line(color = "black", linewidth = 1), 
+        axis.ticks.y = element_line(color = "black", linewidth = 1), 
+        text = element_text(size = base_size, color = "black"), 
+        axis.ticks.length=unit(.25, "cm")
+  )
+}
+
+name_conversion <- list(
+  "AS-1074014-LR-69532" = "XYT - WT - B6",
+  "AS-1074020-LR-69532" = "XYT - WT - F1", 
+  "AS-1096362-LR-69717" = "XXO - F1", 
+  "AS-1096364-LR-69717" = "XXT - F1", 
+  "AS-1074016-LR-69532" = "XYO - F1", 
+  "AS-1074018-LR-69532" = "XYT - F1",
+  "AS-1074022-LR-69532" = "XYT - B6 - founder 1",
+  "AS-1074024-LR-69532" = "XYT - B6 - founder 2"
+)
+
+```
+
+This script generates all figures for the whole genome analysis. 
+We first perform some general QC on the whole genome datasets and look at the number of sequenced reads and the duplication rates: 
+
+```{r read_stats}
+
+# Get bam file paths
+samples <- list.dirs("./output/", recursive = F, full.names = F)
+samples <- samples[grepl("AS-", samples)]
+sample_paths_unfiltered <- paste0("./output/", samples, "/aligned/", samples, ".sorted.bam")
+sample_paths_deduplicated <- paste0("./output/", samples, "/aligned/", samples, ".sorted.markdup.bam")
+
+# calculate mapping stats based on bowtie output
+mapping_stats_unfiltered <- lapply(sample_paths_unfiltered, function(x){
+  x = BamFile(x)
+  idx_stats <- idxstatsBam(x)
+  mapped_to_unplaced <- idx_stats[grepl("(^Un_)|_random", idx_stats$seqnames), ]
+  idx_stats <- idx_stats[!grepl("(^Un_)|_random", idx_stats$seqnames), ]
+  unplaced <- sum(mapped_to_unplaced$mapped) + sum(mapped_to_unplaced$unmapped)
+  unmapped <- unplaced + sum(idx_stats$unmapped)
+  output <- idx_stats[idx_stats$seqnames != "*", c("seqnames", "seqlength", "mapped"), ]
+  output$seqnames <- factor(output$seqnames, levels = c(levels(output$seqnames), "unmapped"))
+  output <- rbind(output, list("seqnames" = "unmapped", "seqlength" = 0, "mapped" = unmapped))
+  output <- cbind("sample" = gsub(".sorted.bam", "", basename(x$path)), output)
+}) %>% do.call("rbind", .)
+
+# mapping stats based on deduplicated output
+mapping_stats_dedup <- lapply(sample_paths_deduplicated, function(x){
+  print(x)
+  x = BamFile(x)
+  idx_stats <- idxstatsBam(x)
+  mapped_to_unplaced <- idx_stats[grepl("(^Un_)|_random", idx_stats$seqnames), ]
+  idx_stats <- idx_stats[!grepl("(^Un_)|_random", idx_stats$seqnames), ]
+  unplaced <- sum(mapped_to_unplaced$mapped) + sum(mapped_to_unplaced$unmapped)
+  unmapped <- unplaced + sum(idx_stats$unmapped)
+  output <- idx_stats[idx_stats$seqnames != "*", c("seqnames", "seqlength", "mapped"), ]
+  output$seqnames <- factor(output$seqnames, levels = c(levels(output$seqnames), "unmapped"))
+  output <- rbind(output, list("seqnames" = "unmapped", "seqlength" = 0, "mapped" = unmapped))
+  output <- cbind("sample" = gsub(".sorted.markdup.bam", "", basename(x$path)), output)
+}) %>% do.call("rbind", .)
+
+# summarize data
+mapping_stats_unfiltered %>% 
+  mutate("covariate" = seqnames == "unmapped") %>%
+  group_by(sample, covariate) %>%
+  summarize(read_number = sum(mapped)) %>%
+  mutate(covariate = ifelse(covariate, "unmapped", "mapped")) -> summarized_unfiltered
+
+# plot mapping rate per sample
+summarized_unfiltered %>%
+  mutate(sample = unlist(name_conversion[sample])) %>%
+  ggplot(aes(x = sample, y = read_number, fill = covariate)) + 
+    geom_bar(stat = "identity", position = "fill") +
+    xlab("") + ylab("Proportion of reads") + 
+    labs(fill = "") + 
+    scale_fill_manual(values = c("grey", "black")) + 
+    ggtitle("Mapping rate of WGS data") + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + 
+    coord_flip() + 
+    theme_paper(base_size = 25)
+ggplot2::ggsave("./plots/wgs/mapping_rate_exp1.pdf", width = 10, height = 8)
+
+# collect duplication rates
+mapping_stats_dedup %>% 
+  mutate("covariate" = seqnames == "unmapped") %>%
+  group_by(sample, covariate) %>%
+  summarize(read_number = sum(mapped)) %>%
+  mutate(covariate = ifelse(covariate, "unmapped", "mapped")) -> summarized_dedup
+
+summarized_combined <- rbind(cbind(summarized_unfiltered, "quant" = "raw"), cbind(summarized_dedup, "quant" = "dedup")) %>% 
+  dplyr::filter(covariate != "unmapped")
+
+# plot duplication rate per sample
+summarized_combined %>% 
+  mutate(sample = unlist(name_conversion[sample])) %>%
+  mutate(quant = factor(quant, levels = c("raw", "dedup"))) %>%
+  ggplot(aes(x = sample, y = read_number, fill = quant)) + 
+    geom_bar(stat = "identity", position = "dodge", col = "black") +
+    xlab("") + ylab("Number of Reads") + 
+    labs(fill = "") + 
+    scale_fill_manual(values = c("white", "beige")) + 
+    ggtitle("Number of reads post deduplication") + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + 
+    coord_flip() + 
+    theme_paper(base_size = 25)
+ggplot2::ggsave("./plots/wgs/reads_after_dedup_exp1.pdf", width = 10, height = 8)
+
+```
+
+We next look at the genome-wide coverage in 1mb windows: 
+
+```{r coverage}
+
+# Calculate coverages in 1mb windows using the bamProfile function from the bamsignals
+bsub_chunk(name = 'compute_coverages', 
+           packages = c('GenomicRanges', 'Rsamtools', 'bamsignals', 'tidyverse', 'GenomicFeatures'), 
+           memory = 100,
+           core = 10, hour = 5, {
+
+           samples <- list.dirs("./output/", recursive = F, full.names = F)
+           sample_paths_deduplicated <- paste0("./output/", samples, "/aligned/", samples, ".sorted.markdup.bam")
+
+           binsize = 1e6
+
+           parent_dir <- "./"
+
+           sample_paths_deduplicated <- paste0(parent_dir, sample_paths_deduplicated)
+
+           chromosome_sizes <- getChromInfoFromUCSC("mm10")
+           chromosome_sizes <- chromosome_sizes[chromosome_sizes$chrom %in% paste0("chr", c(1:19, "X", "Y", "M")), ]
+           chromosome_granges <- makeGRangesFromDataFrame(
+             data.frame("seqnames" = gsub("chr", "", chromosome_sizes$chrom), "start" = 1, "end" = chromosome_sizes$size)
+            )
+
+           for (sample in sample_paths_deduplicated){
+             binnedSigs <- bamProfile(sample, chromosome_granges, binsize = binsize, verbose=T)
+             output_dir <- paste0(dirname(dirname(sample)), "/coverage/")
+             system(paste0("mkdir -p ", output_dir))
+             saveRDS(binnedSigs, paste0(output_dir, "./binned_coverage.rds"))
+           }
+})
+
+binwidth = 1e6
+chr_names <- paste0("chr", c(1:19, "X", "Y", "M"))
+
+samples_here <- samples
+
+# load coverage tracks
+coverage_tracks <- lapply(samples_here, function(sample){
+  data_test <- readRDS(paste0('./output/', sample, '/coverage/binned_coverage.rds'))
+  lapply(1:length(data_test), function(i){
+  chr_name <- chr_names[i]
+  coverage_chromosome <- data_test[i]
+  df_out <- data.frame(
+    sample = sample, 
+    chr = chr_name, 
+    pos = binwidth * 1:length(coverage_chromosome), 
+    cov = coverage_chromosome
+  )
+  df_out <- df_out[-nrow(df_out), ]
+  }) %>% do.call("rbind", .) %>% mutate(index = 1:nrow(.)) -> coverage_track
+  return(coverage_track)
+}) %>% do.call('rbind', .)
+
+# plot coverage tracks genome wide
+coverage_tracks %>% 
+  mutate(sample = unlist(name_conversion[sample])) %>%
+  mutate(chr_color = ifelse(chr %in% chr_names[1:11 * 2], "grey", "black")) %>%
+  ggplot(aes(x = index, y = cov, col = chr_color)) + 
+    geom_point() + 
+    scale_y_log10() + 
+    scale_color_manual(values = c("grey", "black")) + 
+    theme_bw(base_size = 30) + 
+    facet_wrap(~sample) + 
+    xlab("Genome position bin") + 
+    ylab("Unnormalized Coverage (log number of reads)") + 
+    ggtitle("Coverage Plot (1mb)") + 
+    theme(legend.position = "None")
+ggplot2::ggsave("./plots/wgs/genome_wide_coverage_exp1_log.pdf", width = 16, height = 12)
+
+coverage_tracks %>% 
+  mutate(sample = unlist(name_conversion[sample])) %>%
+  mutate(chr_color = ifelse(chr %in% chr_names[1:11 * 2], "grey", "black")) %>%
+  ggplot(aes(x = index, y = cov, col = chr_color)) + 
+    geom_point() + 
+    ylim(c(0, 250000)) + 
+    scale_color_manual(values = c("grey", "black")) + 
+    theme_bw(base_size = 30) + 
+    facet_wrap(~sample) + 
+    xlab("Genome position bin") + 
+    ylab("Unnormalized Coverage (number of reads)") + 
+    ggtitle("Coverage Plot (1mb)") + 
+    theme(legend.position = "None")
+ggplot2::ggsave("./plots/wgs/genome_wide_coverage_exp1_focus.pdf", width = 16, height = 12)
+
+# zoom in on sex chromosomes
+coverage_tracks %>% 
+  mutate(sample = unlist(name_conversion[sample])) %>%
+  mutate(chr_color = ifelse(chr %in% chr_names[1:11 * 2], "grey", "black")) %>%
+  dplyr::filter(chr %in% c("chrX", "chrY")) %>%
+  ggplot(aes(x = index, y = cov, col = chr_color)) + 
+    geom_point() + 
+    ylim(c(c(0, 250000))) + 
+    scale_color_manual(values = c("grey", "black")) + 
+    theme_bw(base_size = 30) + 
+    facet_wrap(~sample) + xlab("Genome position bin") + 
+    ylab("Unnormalized Coverage (log number of reads)") + 
+    ggtitle("XY Coverage Plot (1mb)") + 
+    theme(legend.position = "None")
+
+### add additional metadata as to which samples are which, and attempt to normalize: 
+metadata <- data.frame(
+  sample = unique(coverage_tracks$sample), 
+  strain = c("B6", "B6 x CAST", "B6 x CAST", "B6 x CAST", "B6", "B6", "B6 x CAST", "B6 x CAST"), 
+  genotype = c("wild type", "XY:Ov", "XY:T", "wild type", "XY:T", "XY:T", "XX:Ov", "XX:T"), 
+  replicate = c("rep1", "rep1", "rep2", "rep1", "rep1", "rep2", "rep1", "rep1")
+)
+
+coverage_tracks <- coverage_tracks %>% right_join(metadata)
+
+# compute normalization size factors which we define as median coverage across all chromosomes
+coverage_tracks %>%
+  group_by(sample) %>%
+  summarize(size_factor = median(cov)) %>%
+  pull(size_factor, name = sample) -> median_size_factors
+
+# visualize coverage histograms
+coverage_tracks %>% 
+  ggplot(aes(x = cov + 1)) + geom_histogram(bins = 40) + facet_wrap(~sample) + 
+    scale_x_log10() + scale_y_log10()
+ggplot2::ggsave("./plots/wgs/unnormalized_histogram_exp1.pdf", width = 16, height = 12)
+
+# calculate normalized coverages
+coverage_tracks_norm <- coverage_tracks %>% 
+  group_by(sample) %>% 
+  mutate(cov = cov / (median_size_factors[sample])) %>% 
+  ungroup()
+
+# visualize normalized coverage histograms
+coverage_tracks_norm %>% 
+  ggplot(aes(x = cov)) + geom_histogram(bins = 40) + facet_wrap(~sample) + 
+   scale_x_log10() + scale_y_log10()
+ggplot2::ggsave("./plots/wgs/median_normalized_histogram_exp1.pdf", width = 16, height = 12)
+
+# plot normalized coverages
+coverage_tracks_norm %>%
+  mutate(chr_color = ifelse(chr %in% chr_names[1:11 * 2], "grey", "black")) %>%
+  mutate(Condition = factor(unlist(name_conversion[sample]), levels = as.character(name_conversion))) %>%
+  ggplot(aes(x = index, y = cov, col = chr_color)) + geom_point(size = 1) +
+    ylim(c(0, 1.5)) + 
+    scale_color_manual(values = c("grey", "black")) +
+    theme_bw(base_size = 15) + facet_wrap(~Condition, nrow = n_samples) + 
+    xlab("Genome position bin") + ylab("Normalized Coverage") + theme(legend.position = "None")
+ggplot2::ggsave("./plots/wgs/whole_genome_overview_1mb_final.pdf", width = 12, height = 14)
+ggplot2::ggsave("./plots/wgs/whole_genome_overview_1mb_final.png", width = 12, height = 14)
+
+```
+
+Now we zoom into the X / Y with 1kb resolution: 
+
+```{r coverage}
+
+# compute coverages in 1kb windows
+bsub_chunk(name = 'compute_coverages_xy', 
+           packages = c('GenomicRanges', 'Rsamtools', 'bamsignals', 'tidyverse', 'GenomicFeatures'), 
+           memory = 100,
+           core = 10, hour = 5, {
+
+           samples <- list.dirs("./output/", recursive = F, full.names = F)
+
+           sample_paths_deduplicated <- paste0("./output/", samples, "/aligned/", samples, ".sorted.markdup.bam")
+
+           binsize = 1e3
+
+           parent_dir <- "./"
+
+           sample_paths_deduplicated <- paste0(parent_dir, sample_paths_deduplicated)
+
+           chromosome_sizes <- getChromInfoFromUCSC("mm10")
+           chromosome_sizes <- chromosome_sizes[chromosome_sizes$chrom %in% paste0("chr", c(1:19, "X", "Y", "M")), ]
+           chromosome_granges <- makeGRangesFromDataFrame(
+             data.frame("seqnames" = gsub("chr", "", chromosome_sizes$chrom), "start" = 1, "end" = chromosome_sizes$size))
+
+           for (sample in sample_paths_deduplicated){
+             binnedSigs <- bamProfile(sample, chromosome_granges, binsize = binsize, verbose=T)
+             output_dir <- paste0(dirname(dirname(sample)), "/coverage/")
+             system(paste0("mkdir -p ", output_dir))
+             sample_here <- gsub(".sorted.markdup.bam", "", basename(sample))
+             saveRDS(binnedSigs, paste0(output_dir, "./", sample_here, "_binned_coverage_1kb.rds"))
+           }
+})
+
+binwidth = 1e3
+chr_names <- paste0("chr", c("X", "Y"))
+
+samples_here <- samples
+
+coverage_tracks <- lapply(samples_here, function(sample){
+  data_test <- readRDS(paste0('./output/', sample, '/coverage/binned_coverage_1kb.rds'))
+  lapply(1:length(data_test), function(i){
+  chr_name <- chr_names[i]
+  coverage_chromosome <- data_test[i]
+  df_out <- data.frame(
+    sample = sample, 
+    chr = chr_name, 
+    pos = binwidth * 1:length(coverage_chromosome), 
+    cov = coverage_chromosome
+  )
+  df_out <- df_out[-nrow(df_out), ]
+  }) %>% do.call("rbind", .) %>% mutate(index = 1:nrow(.)) -> coverage_track
+  return(coverage_track)
+}) %>% do.call('rbind', .)
+
+coverage_tracks <- coverage_tracks %>% right_join(metadata)
+
+# compute size factors for the 1kb windows
+coverage_tracks %>% 
+  group_by(sample) %>% 
+  summarize(size_factor = median(cov)) %>% 
+  pull(size_factor, name = sample) -> median_size_factors
+
+coverage_tracks_norm <- coverage_tracks %>% 
+  group_by(sample) %>% 
+  mutate(cov = cov / (median_size_factors[sample])) %>% 
+  ungroup()
+
+n_samples <- length(unique(coverage_tracks_norm$sample))
+
+# specify the window position of the sry_gene
+sry_position <- 2662471
+sry_window <- coverage_tracks_norm %>% dplyr::filter(chr == "chrY") %>% dplyr::select(c("pos", "index", "chr")) %>% 
+  dplyr::filter(abs(pos - sry_position) == min(abs(pos - sry_position))) %>% pull(index) %>% unique()
+
+# plot normalized coverage across X and Y chromosomes
+coverage_tracks_norm %>%
+  mutate(chr_color = ifelse(chr %in% chr_names[1:11 * 2], "grey", "black")) %>%
+  mutate(chr_color = ifelse(chr_color == "grey", "chrX", "chrY")) %>%
+  dplyr::filter(pos %% 10000 == 0) %>%
+  mutate(Condition = factor(unlist(name_conversion[sample]), levels = as.character(name_conversion))) %>%
+  ggplot(aes(x = index, y = cov, col = chr_color)) + 
+    geom_point(size = .1) +
+    ylim(c(0, 4)) + 
+    scale_color_manual(values = c("grey", "black")) +
+    theme_bw(base_size = 15) + 
+    facet_wrap(~Condition, nrow = n_samples) + 
+    xlab("Genome position bin") + 
+    ylab("Normalized Coverage (log)") + 
+    geom_vline(xintercept = sry_window, color = "red", alpha = 0.8, width = 1e6) + 
+    annotate(geom = "rect", xmin = 1.6553e8 / 1000, xmax = 1.6875e8 / 1000, ymin = 0, ymax = 4, fill = "orange", alpha = 0.3) +
+    theme(legend.position = "None")
+ggplot2::ggsave("./plots/wgs/xy_overview_1kb_final.pdf", width = 12, height = 14)
+ggplot2::ggsave("./plots/wgs/xy_overview_1kb_final.png", width = 12, height = 14)
+
+# normalized coverage
+coverage_tracks_norm %>%
+  mutate(chr_color = ifelse(chr %in% chr_names[1:11 * 2], "grey", "black")) %>%
+  mutate(chr_color = ifelse(chr_color == "grey", "chrX", "chrY")) %>%
+  dplyr::filter(pos %% 10000 == 0) %>%
+  mutate(Condition = factor(unlist(name_conversion[sample]), levels = as.character(name_conversion))) %>%
+  ggplot(aes(x = index, y = cov, col = chr_color)) + 
+    geom_point(size = .1) +
+    ylim(c(0, 4)) + 
+    scale_color_manual(values = c("grey", "black")) +
+    theme_bw(base_size = 15) + 
+    facet_wrap(~Condition, nrow = n_samples) + 
+    xlab("Genome position bin") + 
+    ylab("Normalized Coverage (log)") + 
+    geom_vline(xintercept = sry_window, color = "red", alpha = 0.8, width = 1e6) + 
+    annotate(geom = "rect", xmin = 1.6553e8 / 1000, xmax = 1.6875e8 / 1000, ymin = 0, ymax = 4, fill = "orange", alpha = 0.3) +
+    theme(legend.position = "None")
+ggplot2::ggsave("./plots/wgs/xy_overview_1kb_final_wo_london.pdf", width = 12, height = 14)
+ggplot2::ggsave("./plots/wgs/xy_overview_1kb_final_wo_london.png", width = 12, height = 14)
+
+# compute coverage fold change against XY WT control
+coverage_tracks_norm %>%
+  mutate(chr_color = ifelse(chr %in% chr_names[1:11 * 2], "grey", "black")) %>%
+  mutate(chr_color = ifelse(chr_color == "grey", "chrX", "chrY")) %>%
+  dplyr::filter(pos %% 10000 == 0) %>%
+  mutate(Condition = factor(unlist(name_conversion[sample]), levels = as.character(name_conversion))) %>%
+  dplyr::select(-c("sample", "strain", "genotype", "replicate")) %>%
+  group_by(index) %>%
+  mutate(Control = cov[Condition == "XYT - WT - B6"]) %>%
+  mutate(fold_change = log2((cov) / (Control))) %>%
+  ggplot(aes(x = index, y = fold_change, col = chr_color)) + geom_point(size = .1) +
+    ylim(c(-4, 4)) + 
+    scale_color_manual(values = c("grey", "black")) +
+    theme_bw(base_size = 15) + facet_wrap(~Condition, nrow = n_samples) + 
+    xlab("Genome position bin") + ylab("Coverage Fold Change (to wild type control)") + 
+    geom_vline(xintercept = sry_window, color = "red", alpha = 0.8, width = 1e6) + 
+    annotate(geom = "rect", xmin = 1.6553e8 / 1000, xmax = 1.6875e8 / 1000, ymin = -4, ymax = 4, fill = "orange", alpha = 0.3) +
+    theme(legend.position = "None")
+ggplot2::ggsave("./plots/wgs/xy_overview_1kb_final_fold_change.pdf", width = 12, height = 14)
+ggplot2::ggsave("./plots/wgs/xy_overview_1kb_final_fold_change.png", width = 12, height = 14)
+
+```
+
+Then we look at heterozygous variants in the amplified region: 
+
+```{r allelic_ratios}
+
+
+# First check the assignability of reads to different haplotypes: 
+# snpsplit assignment report: *.sorted.markdup.SNPsplit_sort.txt
+snp_stat_files <- paste0("./output/", samples, "/aligned/", samples, ".markdup.SNPsplit_report.yaml")
+
+snp_split_stats <- lapply(snp_stat_files, function(x){
+  print(x)
+  snp_stats <- yaml::read_yaml(x)
+  sample_name <- gsub(".markdup.SNPsplit_report.yaml", "", basename(x))
+  data.frame("Sample" = sample_name, "G1" = snp_stats$Tagging$g1, "G2"  = snp_stats$Tagging$g2, "Unassigned" = snp_stats$Tagging$unassignable)
+}) %>% do.call("rbind", .)
+
+# plot read assignment frequency
+snp_split_stats %>%
+  pivot_longer(-Sample) %>%
+  ggplot(aes(x = Sample, y = value, fill = name)) + 
+    geom_bar(stat = "identity", position = "fill", col = "black") +
+    xlab("") + ylab("Fraction of Reads") + 
+    labs(fill = "") +
+    scale_fill_manual(values = c("black", "chocolate", "grey")) +
+    ggtitle("Fraction of allelically assignable reads") +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + 
+    coord_flip() + 
+    theme_paper(base_size = 25)
+ggplot2::ggsave("./plots/wgs/assignable_reads_exp1.pdf", width = 16, height = 12)
+
+# compute coverages from allele-specific bam files
+bsub_chunk(name = 'compute_coverages_allelic', 
+           packages = c('GenomicRanges', 'Rsamtools', 'bamsignals', 'tidyverse', 'GenomicFeatures'), 
+           memory = 100,
+           core = 10, hour = 5, {
+
+           samples <- list.dirs("./output/", recursive = F, full.names = F)
+           samples <- samples[grepl("AS-", samples)]
+           sample_paths_deduplicated_g1 <- paste0("./output/", samples, "/aligned/", samples, ".sorted.markdup.genome1.bam")
+           sample_paths_deduplicated_g2 <- paste0("./output/", samples, "/aligned/", samples, ".sorted.markdup.genome2.bam")
+
+           binsize = 1e3
+
+           parent_dir <- "./"
+
+           sample_paths_deduplicated_g1 <- paste0(parent_dir, sample_paths_deduplicated_g1)
+           sample_paths_deduplicated_g2 <- paste0(parent_dir, sample_paths_deduplicated_g2)
+
+           chromosome_sizes <- getChromInfoFromUCSC("mm10")
+           chromosome_sizes <- chromosome_sizes[chromosome_sizes$chrom %in% paste0("chr", c(1:19, "X", "Y", "M")), ]
+           chromosome_granges <- makeGRangesFromDataFrame(
+             data.frame("seqnames" = gsub("chr", "", chromosome_sizes$chrom), "start" = 1, "end" = chromosome_sizes$size))
+
+           for (sample in sample_paths_deduplicated_g1){
+             binnedSigs <- bamProfile(sample, chromosome_granges, binsize = binsize, verbose=T)
+             output_dir <- paste0(dirname(dirname(sample)), "/coverage/")
+             system(paste0("mkdir -p ", output_dir))
+             saveRDS(binnedSigs, paste0(output_dir, "./binned_coverage_g1.rds"))
+           }
+
+           for (sample in sample_paths_deduplicated_g2){
+             binnedSigs <- bamProfile(sample, chromosome_granges, binsize = binsize, verbose=T)
+             output_dir <- paste0(dirname(dirname(sample)), "/coverage/")
+             system(paste0("mkdir -p ", output_dir))
+             saveRDS(binnedSigs, paste0(output_dir, "./binned_coverage_g2.rds"))
+           }
+})
+
+binwidth = 1e3
+chr_names <- paste0("chr", c(1:19, "X", "Y"))
+
+samples_here <- samples
+
+# compile coverage data for genotype 1
+coverage_tracks_g1 <- lapply(samples_here, function(sample){
+  data_test <- readRDS(paste0('./output/', sample, '/coverage/binned_coverage_g1.rds'))
+  lapply(1:length(data_test), function(i){
+  chr_name <- chr_names[i]
+  coverage_chromosome <- data_test[i]
+  df_out <- data.frame(
+    sample = sample,
+    chr = chr_name,
+    pos = binwidth * 1:length(coverage_chromosome),
+    cov = coverage_chromosome
+  )
+  df_out <- df_out[-nrow(df_out), ]
+  }) %>% do.call("rbind", .) %>% mutate(index = 1:nrow(.)) -> coverage_track
+  return(coverage_track)
+}) %>% do.call('rbind', .) %>% add_column("Genotype" = "B6")
+
+# compile coverage data for genotype 2
+coverage_tracks_g2 <- lapply(samples_here, function(sample){
+  data_test <- readRDS(paste0('./output/', sample, '/coverage/binned_coverage_g2.rds'))
+  lapply(1:length(data_test), function(i){
+  chr_name <- chr_names[i]
+  coverage_chromosome <- data_test[i]
+  df_out <- data.frame(
+    sample = sample,
+    chr = chr_name,
+    pos = binwidth * 1:length(coverage_chromosome),
+    cov = coverage_chromosome
+  )
+  df_out <- df_out[-nrow(df_out), ]
+  }) %>% do.call("rbind", .) %>% mutate(index = 1:nrow(.)) -> coverage_track
+  return(coverage_track)
+}) %>% do.call('rbind', .) %>% add_column("Genotype" = "CAST")
+
+coverage_tracks <- rbind(coverage_tracks_g1, coverage_tracks_g2) %>% right_join(metadata) %>%
+  dplyr::filter(chr %in% c("chrX"))
+
+# allelic ratio tracks
+coverage_tracks %>%
+  dplyr::filter(grepl("B6 x CAST", strain)) %>%
+  dplyr::filter(pos %% 10000 == 0) %>%
+  pivot_wider(values_from = cov, names_from = Genotype) %>%
+  mutate(AllelicRatio = B6 / (B6 + CAST)) %>%
+  mutate(Condition = factor(unlist(name_conversion[sample]), levels = as.character(name_conversion))) %>%
+  ggplot(aes(x = pos, y = AllelicRatio, col = chr)) + 
+    geom_point(size = .1) +
+    ylim(c(0, 1)) + 
+    scale_color_manual(values = c("black", "grey")) +
+    theme_bw(base_size = 15) +
+    facet_wrap(~Condition, nrow = n_samples) + 
+    xlab("Genome position bin") + 
+    ylab("Allelic ratio (B6 / B6 + CAST))") + 
+    annotate(geom = "rect", xmin = 1.6553e8, xmax = 1.6875e8, ymin = 0, ymax = 1, fill = "orange", alpha = 0.3) +
+    theme(legend.position = "None")
+ggplot2::ggsave("./plots/wgs/xy_overview_1kb_allelic_ratio.pdf", width = 12, height = 8)
+ggplot2::ggsave("./plots/wgs/xy_overview_1kb_allelic_ratio.png", width = 12, height = 8)
+
+# 
+p2_new <- coverage_tracks %>%
+  dplyr::filter(grepl("B6 x CAST", strain)) %>%
+  dplyr::filter(pos %% 1000 == 0) %>%
+  pivot_wider(values_from = cov, names_from = Genotype) %>%
+  mutate(AllelicRatio = B6 / (B6 + CAST)) %>%
+  mutate(Condition = factor(unlist(name_conversion[sample]), levels = as.character(name_conversion))) %>%
+  dplyr::filter(sample == "AS-1074018-LR-69532") %>%
+  dplyr::filter(pos > 1.6e08 & pos < 1.7e08) %>%
+  ggplot(aes(x = pos, y = AllelicRatio, col = chr)) + 
+    geom_point(size = .1) +
+    ylim(c(0, 1)) + 
+    scale_color_manual(values = c("black", "grey")) +
+    theme_paper(base_size = 40) + 
+    facet_wrap(~Condition, nrow = n_samples) + 
+    xlab("Genome position bin") + 
+    ylab("Allelic ratio \n (B6 / B6 + CAST))") + 
+    annotate(geom = "rect", xmin = 1.6553e8, xmax = 1.6875e8, ymin = -Inf, ymax = Inf, fill = "orange", alpha = 0.3) +
+    annotate(geom = "rect", alpha = 0.2, fill = "purple", xmin = 168750000, xmax = Inf, ymin = -Inf, ymax = Inf) + 
+    theme(legend.position = "None")
+p2_new
+
+```
+
+```{r figure_plot}
+
+# get chromosome visualizations
+library("EnsDb.Mmusculus.v79")
+gene_info <- data.frame(ensembldb::genes(EnsDb.Mmusculus.v79))
+gene_info <- gene_info[!duplicated(gene_info$symbol), ]
+
+x_chromosome_coordinates <- data.frame("Chr" = "X", "Start" = 0, "End" = 200*1e6, "CE_start" = 1*1e6, "CE_end" = 2.1e6)
+
+gene_locations <- cbind(data.frame(gene_info[,c("seqnames", "start", "end", "gene_name")]), "Value" = 1)
+rownames(gene_locations) <- c()
+colnames(gene_locations) <- c("Chr", "Start", "End", "Symbol", "Value")
+
+gene_locations <- gene_locations[gene_locations$Chr == "X" & gene_locations$Start > 165.5 * 1e6, ]
+gene_locations$End <- gene_locations$Start + 1
+
+approx_breakpoint = 1.6553e8
+approx_breakpoint_end = 1.6875e8
+par_boundary = 168750000
+
+library(ggbio)
+p.ideo <- Ideogram(genome = "mm10", subchr = "chrX") + xlim(GRanges("chrX", IRanges(approx_breakpoint, approx_breakpoint_end)))
+p.ideo
+
+p.ideo.2 <- autoplot(makeGRangesFromDataFrame(gene_locations), layout = "karyogram", alpha = 0.5, color = "orange") + theme_void()
+p.ideo.2
+
+coverage_tracks_norm %>%
+  mutate(chr_color = ifelse(chr %in% chr_names[1:11 * 2], "grey", "black")) %>%
+  mutate(chr_color = ifelse(chr_color == "grey", "X", "Y")) %>%
+  dplyr::filter(pos %% 100 == 0) %>%
+  dplyr::filter(chr == "chrX") %>%
+  dplyr::filter(sample %in% c("AS-1074014-LR-69532", "AS-1074022-LR-69532")) %>%
+  dplyr::filter(pos > 1.6e08 & pos < 1.7e08) %>%
+  mutate(genotype = factor(genotype, levels = c("wild type", "XY:T"))) %>%
+  mutate(cov = ifelse(cov > 10, 10, cov)) %>%
+  ggplot(aes(x = pos, y = cov)) + 
+    geom_hline(yintercept = 1) + 
+    geom_point(size = .1) +
+    scale_y_log10(limits = c(0.5, 11)) + 
+    theme_paper(base_size = 40) + 
+    facet_wrap(~genotype, nrow = 2) + 
+    xlab("Genome position bin") + 
+    ylab("Normalized Coverage (log)") + 
+    xlab("") -> p1
+
+approx_breakpoint = 1.6553e8
+approx_breakpoint_end = 1.6875e8
+par_boundary = 168750000
+
+### fix the offset here
+coverage_tracks_norm %>% 
+  dplyr::filter(pos %% 100 == 0) %>%
+  dplyr::filter(chr == "chrX") %>%
+  dplyr::filter(sample %in% c("AS-1074014-LR-69532", "AS-1074022-LR-69532")) %>%
+  dplyr::filter(pos > 1.6e08 & pos < 1.7e08) %>%
+  mutate(genotype = factor(genotype, levels = c("wild type", "XY:T"))) %>%
+  dplyr::select(c("pos", "genotype", "cov")) %>%
+  pivot_wider(names_from = genotype, values_from = cov) %>%
+  ggplot(aes(x = pos, y = log2( (`XY:T`) / (`wild type`) ))) + 
+    annotate(geom = "rect", alpha = 0.2, fill = "purple",
+             xmin = par_boundary, xmax = Inf, ymin = -Inf, ymax = Inf) + 
+    annotate(geom = "rect", alpha = 0.2, fill = "orange", 
+             xmin = approx_breakpoint, xmax = approx_breakpoint_end, ymin = -Inf, ymax = Inf) + 
+    geom_point(size = .1) + 
+    theme_paper(base_size = 40) + xlab("Genome position bin") + ylab("Coverage Fold Change \n (XY:T founder / WT male)") + 
+    geom_hline(yintercept = 1, linetype = 'dashed', col = 'red') -> p2
+
+library(patchwork)
+p_combined <- p.ideo@ggplot + p1 + p2_new + plot_layout(ncol = 1, heights = c(1, 2, .5)) + theme_paper()
+
+pdf("./plots/wgs/full_figure_new.pdf", width = 14, height = 20)
+p_combined
+dev.off()
+
+```
+
+
