@@ -1,0 +1,86 @@
+#!bin/python 
+
+import pandas as pd
+import numpy as np
+import os
+import pdb
+
+# Define parent dir (could be done automatically)
+parent_dir = "./"
+
+# Give paths to cellranger references (could be in config)
+reference_cast = parent_dir + "/genome_files/B6_masked_cast/"
+
+# Give paths to SNP files (for allelic mapping only)
+snps_cast = parent_dir + "/genome_files/wasp_processed/"
+snps_cast_filt = "/wasp_processed_filtered/"
+
+# Give the paths to the odcf files
+path_b6_cas = parent_dir + "./data/"
+
+# 
+metadata_b6_mcas=pd.read_csv("./data-files.csv")
+INDIVIDUALS = metadata_b6_mcas["Sample"].unique()
+
+# Define a dictionary with genomes for the different strains for snakemake to call
+reference_dict = {"c57bl6-ly5.1 x cast/eij" : reference_cast}
+sample_to_genome = {INDIVIDUALS[i]: "c57bl6-ly5.1 x cast/eij" for i in range(metadata_b6_mcas.shape[0])}
+
+all_targets = ["cellranger_output/" + str(ind) + "/outs/allele_specific_counts/ase_feature_matrix/" for ind in INDIVIDUALS]
+all_targets_filtered = ["cellranger_output/" + str(ind) + "/outs/allele_specific_counts_corrected/ase_feature_matrix_filtered/" for ind in INDIVIDUALS]
+all_targets_bulk = ["cellranger_output/" + str(ind) + "/outs/allele_specific_counts/per_snp_coverage.tsv" for ind in INDIVIDUALS]
+
+ruleorder: intersecting_snps > intersecting_snps_removeart
+
+rule all:
+    input:
+        all_targets
+
+# Create a folder linked_files, create one folder per sample in there which contains links to all sample fastqs
+# The format of the link names prepares the samples for cellranger: 
+# {SAMPLE_ID}_{S1-4}_{LaneNr}_{R1|2}_001.fastq.gz
+# I didnt have multiple lanes per sample, so this would need to be added
+rule link_files:
+    output: directory("linked_files/{sample}/")
+    run:
+        INDIVIDUAL = wildcards.sample
+        individual_dir = "linked_files/" + str(INDIVIDUAL) + "/"
+
+        if not os.path.exists(individual_dir):
+            os.makedirs(individual_dir)
+
+        for i in np.arange(1, len(fastqs_R1) + 1):
+            print(i)
+            file_here = data_dir + INDIVIDUAL + "_S" + i + "_L001_R1.fastq.gz"
+            print(file_here)
+            os.system("ln -s " + file_here + " " +  parent_dir + "/linked_files/" + str(INDIVIDUAL) + "/" + str(INDIVIDUAL) + "_S" + str(i) + "_L001_R1_001.fastq.gz")
+
+    
+        for i in np.arange(1, len(fastqs_R2) + 1):
+            print(i)
+            file_here = data_dir + INDIVIDUAL + "_S" + i + "_L001_R2.fastq.gz"
+            print(file_here)
+            os.system("ln -s " + file_here + " " +  parent_dir + "/linked_files/" + str(INDIVIDUAL) + "/" + str(INDIVIDUAL) + "_S" + str(i) + "_L001_R2_001.fastq.gz")
+
+
+# Run cellranger for each sample in linked_files and put output into new folder cellranger_output
+# Note that I'm using --include-introns
+rule cellranger_sample:
+    input: "linked_files/{sample}/"
+    output: 
+        touch("cellranger_output/cellranger_done/{sample}.done")
+    params:
+        genome = lambda wildcards: sample_to_genome[wildcards.sample]
+    envmodules:
+        "cellranger/6.1.1",
+    shell: 
+        """
+        cd cellranger_output
+        cellranger count \
+            --id {wildcards.sample} \
+            --transcriptome {params.genome} \
+            --fastqs ../{input} \
+            --localcores=16 \
+            --include-introns \
+            --sample {wildcards.sample}
+        """

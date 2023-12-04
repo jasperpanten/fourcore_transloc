@@ -1,0 +1,98 @@
+---
+title: "QC graph paper"
+output: html_document
+date: '2023-11-01'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+#Load library - the below pipeline was run with R 4.1.0
+```{r library, include=FALSE}
+
+setwd(paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+
+library(DropletUtils)
+library(scran)
+library(reshape2)
+library(scater)
+library(ggplot2)
+library(Rtsne)
+library(irlba)
+library(RColorBrewer)
+library(viridis)
+library(pheatmap)
+library(rtracklayer)
+library(gridExtra)
+library(writexl)
+library(PCAtools)
+library(BiocSingular)
+library(scuttle)
+library(batchelor)
+library(org.Mm.eg.db)
+library(limma)
+library(celldex)
+library(bluster)
+library(edgeR)
+library(robustbase)
+library(tidyverse)
+
+```
+
+
+```{r QC graph for paper - Supp_Figure_1 - the full code to generate the below is in generate_sce_fourcore_SDP}
+
+sce.filtered <- readRDS("./processed_data/fourcore_filtered_sce.rds")
+
+samples.test <- c("90130514_36306"="XXO-F1-01", "93202067_36145"="XXO-F1-02", "87882871_34406"="XXO-F1-03","91951650_35978"="XXO-F1-04",#XXF
+             "90131144_36306"="XXT-F1-01","93202705_36145"="XXT-F1-02", "87883510_34406"="XXT-F1-03", "91952280_35978"="XXT-F1-04", #XXM
+        "90131774_36306"="XYO-F1-01", "93203343_36145"="XYO-F1-02", "87884148_34406"="XYO-F1-03", "91952910_35978"="XYO-F1-04", # XYF
+        "90132404_36306"="XYT-F1-01", "93203981_36145"="XYT-F1-02", "87884793_34406"="XYT-F1-03", "91953540_35978"="XYT-F1-04") #XYM
+
+samples <- c("90130514_36306", "93202067_36145", "87882871_34406","91951650_35978",#XXF
+             "90131144_36306","93202705_36145", "87883510_34406", "91952280_35978", #XXM
+        "90131774_36306", "93203343_36145", "87884148_34406", "91952910_35978", # XYF
+        "90132404_36306", "93203981_36145", "87884793_34406", "91953540_35978") #XYM
+
+#number of UMI
+ggcells(sce.filtered, aes(x = Sample, y = sum)) + 
+geom_violin(size=0.7, trim=FALSE, fill="black")+
+  scale_y_log10(limits = c(100, 100000), breaks = trans_breaks("log10", function(x) 10^x, n=4), labels = trans_format("log10", math_format(10^.x))) +
+  scale_x_discrete(limits=samples, labels=samples.test) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_rect(fill=NA, colour = "black", size=1)) +
+  labs(x="",y="UMI counts per cell") +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust=1, size = 8),  axis.text.y = element_text(size = 8))+
+  theme(text=element_text(family="sans"))
+ggsave("./plots/scrnaseq/UMI_FCG_violin.pdf", width = 3, height = 3)
+
+#number of genes
+ggcells(sce.filtered, aes(x = Sample, y = detected)) + 
+geom_violin(size=0.7, trim=FALSE, fill="black")+
+  scale_y_log10(limits = c(100, 10000), breaks = trans_breaks("log10", function(x) 10^x, n=3), labels = trans_format("log10", math_format(10^.x))) + 
+  scale_x_discrete(limits=samples, labels=samples.test) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_rect(fill=NA, colour = "black", 
+size=1)) +
+  labs(x="",y="Number of genes per cell") +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust=1, size = 8), axis.text.y = element_text(size = 8))+
+  theme(text=element_text(family="sans"))
+ggsave("./plots/scrnaseq/Genes_FCG_violin.pdf", width = 3, height = 3)
+
+#number of cells
+ggplot(filtered.df, aes(x = Sample, y = No_cells_filtered)) + 
+  geom_col(fill="black") + 
+  scale_y_continuous(breaks = c(0, 5000, 10000), limits = c(0, 10000), expand = c(0,0)) +
+  scale_x_discrete(limits=samples, labels=samples.test) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_rect(fill=NA, colour = "black", 
+size=1)) +
+  labs(x="",y="Number of cells per sample") +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust=1, size = 8), axis.text.y = element_text(size = 8))+
+  theme(text=element_text(family="sans"))
+ggsave("./plots/scrnaseq/Cells_FCG.pdf", width = 3, height = 3)
+
+```

@@ -1,0 +1,96 @@
+---
+title: "Supp_Fig_4"
+output: html_document
+date: '2023-11-03'
+editor_options: 
+  chunk_output_type: console
+---
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+
+```{r library, include=FALSE}
+
+setwd(paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+
+library(scran)
+library(scater)
+library(ggplot2)
+library(Rtsne)
+library(irlba)
+library(RColorBrewer)
+library(viridis)
+library(pheatmap)
+library(rtracklayer)
+library(gridExtra)
+library(writexl)
+library(PCAtools)
+library(BiocSingular)
+library(scuttle)
+library(batchelor)
+library(org.Mm.eg.db)
+library(limma)
+library(celldex)
+library(bluster)
+library(edgeR)
+library(bsub)
+library(ComplexHeatmap)
+library(tidyverse)
+library(celldex)
+library(SingleR)
+library(ggthemes)
+
+# needed to run quasr
+bsub_opt$call_Rscript = function(version) {
+  GetoptLong::qq("module load libpng/1.6.37, module load R/@{version}; Rscript")
+}
+
+```
+
+```{r celltype_distribution}
+sce <- readRDS("/omics/groups/OE0538/internal/users/s674e/projects/Escapee/FCG_Fusion_Paper/fourcore_sce.final_sample_corrected.rds")
+
+cell.label <- c(
+"B-cell (Fo)"="B-Fo",      
+"B-cell (Mz)"="B-Mz",
+"B-cell (pre)"="B-pre",           
+"B-cell (T)"="B-Tran",  
+"T-cell (CD4 control)"="CD4ctrl",
+"T-cell (CD8 naive)"="CD8naiv",
+"T-cell (CD4 naive)"="CD4naiv", 
+"T-cell (regulatory)"="T-reg",
+"T-cell (gamma-delta)"="T-gd",
+"NK cells"="NK",
+"Basophil"="Baso",         
+"Neutrophils"="Neutro",
+"Monocytes"="Mono"
+)
+
+colData(sce) %>% 
+  data.frame() %>% 
+  group_by(Sample, AnnotatedCellType, Genotype) %>% 
+  summarize(n_cells = n()) %>% 
+  group_by(Sample, Genotype) %>% 
+  mutate(n_cells_per_sample = sum(n_cells)) %>% 
+  mutate(AnnotatedCellType = fct_reorder(AnnotatedCellType, n_cells)) %>%
+  mutate(Genotype= factor(Genotype, levels = c("F1_FCG_XYM", "F1_FCG_XXM",  "F1_FCG_XYF","F1_FCG_XXF"))) %>% 
+  ggplot(aes(x = AnnotatedCellType, y = n_cells / n_cells_per_sample, fill=Genotype)) + 
+  geom_rangeframe(colour = "black", size=1) +
+  theme_tufte() +
+  theme(axis.ticks.length = unit(5, "pt")) +
+  scale_x_discrete( labels=cell.label) +
+  scale_y_log10(limits=c(0.001, 1)) +
+  labs(x="",y="log10 (cell proportion)") +
+  theme(axis.text.x = element_text(vjust=1, size = 8), axis.text.y = element_text(size = 8), 
+        plot.title = element_text(face = "bold"), legend.position="none") +
+  theme(text=element_text(family="sans")) + 
+  geom_boxplot(outlier.color = NA, width=0.7, position=position_dodge(width=0.8)) + 
+  geom_jitter(color="black", size=0.3, position=position_dodge(width=0.8))  + 
+  scale_fill_manual(values = c("lightgrey", "darkgrey", "grey", "black")) + coord_flip()
+ggsave("./plots/scrnaseq/cells_prop_per_genotype.pdf", width = 6, height = 6)
+
+
+```

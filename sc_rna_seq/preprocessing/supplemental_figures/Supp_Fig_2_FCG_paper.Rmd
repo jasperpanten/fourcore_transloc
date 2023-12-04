@@ -1,0 +1,169 @@
+---
+title: "Celltype_graph_paper"
+output: html_document
+date: '2023-11-01'
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+
+```{r library, include=FALSE}
+
+setwd(paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+
+library(scran)
+library(scater)
+library(ggplot2)
+library(Rtsne)
+library(irlba)
+library(RColorBrewer)
+library(viridis)
+library(pheatmap)
+library(rtracklayer)
+library(gridExtra)
+library(writexl)
+library(PCAtools)
+library(BiocSingular)
+library(scuttle)
+library(batchelor)
+library(org.Mm.eg.db)
+library(limma)
+library(celldex)
+library(bluster)
+library(edgeR)
+library(bsub)
+library(ComplexHeatmap)
+library(tidyverse)
+library(celldex)
+library(SingleR)
+
+# needed to run quasr
+bsub_opt$call_Rscript = function(version) {
+  GetoptLong::qq("module load libpng/1.6.37, module load R/@{version}; Rscript")
+}
+
+```
+
+
+
+```{r load and prepare the data}
+# load data
+sce <- readRDS("./processed_data/fourcore_sce.final.rds")
+meta <- readRDS("./processed_data/fourcore_sce.final_meta.rds")
+
+# Check number of cells and samples
+dim(sce) ##103220 cells 
+length(table(sce$Sample)) ##16 samples
+
+# add genotype information
+genotype_metadata <- read_csv("./metadata_rna_four_core.csv") %>% 
+  mutate(sample_identifier = paste0(seq_ids, "_", ILSE_NO))
+
+genotype_annotation <- genotype_metadata %>% pull(GENOTYPE, name = sample_identifier)
+
+sce$Genotype <- genotype_annotation[sce$Sample]
+
+# clusters out: -- likely doublets, outliers
+clusters_out <- c(14, 26, 27)
+sce <- sce[,!sce$label %in% clusters_out]
+
+# aggregate across samples
+sce.aggregate <- aggregateAcrossCells(sce, DataFrame(Sample = sce$Sample, Library = sce$Library))
+
+# add chromosome annotation to the sce.aggregate
+library('AnnotationHub')
+ah <- AnnotationHub()
+query(ah, c("Mus musculus", "Ensembl", "v97"))
+ensdb <- ah[["AH73905"]]
+
+chromosome <- mapIds(ensdb,
+    keys = rownames(sce.aggregate),
+    keytype = "SYMBOL",
+    column = "SEQNAME")
+rowData(sce.aggregate)$chromosome <- chromosome
+
+sce.aggregate <- sce.aggregate[!is.na(rowData(sce.aggregate)$chromosome), ]
+```
+
+
+```{r sry xist counts plot to validate sex / genotypes}
+
+# correct the one sample that is swapped and added it to the sce aggreagated: 
+swapped_sample1 <- "87884148_34406" # annotated as XYF, actually XXF
+swapped_sample2 <- "87882871_34406" # annotated as XXF, actually XYF
+
+sce.aggregate[,sce.aggregate$Sample == swapped_sample1]$Genotype <- "F1_FCG_XXF"
+sce.aggregate[,sce.aggregate$Sample == swapped_sample2]$Genotype <- "F1_FCG_XYF"
+
+# look at sex assignments - calculate the counts as fraction of total counts
+sry_counts <- as.numeric(counts(sce.aggregate["Sry", ]))
+x_counts <- colSums(counts(sce.aggregate[rowData(sce.aggregate)$chromosome == "X", ]))
+xist_counts <- as.numeric(counts(sce.aggregate[rownames(sce.aggregate) == "Xist", ]))
+y_counts <- colSums(counts(sce.aggregate[rowData(sce.aggregate)$chromosome == "Y", ]))
+total_counts <- colSums(counts(sce.aggregate))
+
+sexing_results <- data.frame(
+  Sample = sce.aggregate$Sample, 
+  Genotype = sce.aggregate$Genotype, 
+  TotalCounts = total_counts, 
+  XCounts = x_counts,
+  YCounts = y_counts,
+  XistCounts = xist_counts,
+  SryCounts = sry_counts
+)
+
+# Plot the counts for sry, xist,  x and y chromosome
+
+# Define a custom label format function
+custom_label <- function(x) {
+  format(x, scientific = FALSE, big.mark = "x10^")
+}
+
+samples.test <- c("90130514_36306"="XXO-F1-01", "93202067_36145"="XXO-F1-02", "87884148_34406"="XXO-F1-03", "91951650_35978"="XXO-F1-04",#XXF
+             "90131144_36306"="XXT-F1-01","93202705_36145"="XXT-F1-02", "87883510_34406"="XXT-F1-03", "91952280_35978"="XXT-F1-04", #XXM
+        "90131774_36306"="XYO-F1-01", "93203343_36145"="XYO-F1-02", "87882871_34406"="XYO-F1-03", "91952910_35978"="XYO-F1-04", # XYF
+        "90132404_36306"="XYT-F1-01", "93203981_36145"="XYT-F1-02", "87884793_34406"="XYT-F1-03", "91953540_35978"="XYT-F1-04") #XYM
+
+samples <- c("90130514_36306", "93202067_36145","87884148_34406","91951650_35978", #XXF
+             "90131144_36306","93202705_36145", "87883510_34406", "91952280_35978", #XXM
+        "90131774_36306", "93203343_36145","87882871_34406", "91952910_35978", # XYF
+        "90132404_36306", "93203981_36145", "87884793_34406", "91953540_35978") #XYM
+
+sexing_results %>% 
+  pivot_longer(-c(Sample, Genotype, TotalCounts)) %>%
+  mutate(fraction = value / TotalCounts) %>%
+  ggplot(aes(x = Sample, fill = Genotype, y = fraction)) + 
+  geom_bar(stat = "identity", size=1) + 
+  scale_y_continuous(labels = custom_label) +
+  scale_x_discrete(limits=samples, labels=samples.test) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_rect(fill=NA, colour = "black", size=1)) +
+  facet_wrap(~name, scales = "free_y") + 
+  labs(x="",y="fraction/Total counts")+
+    theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust=1, size = 8), axis.text.y = element_text(size = 8))+
+  theme(text=element_text(family="sans"))
+ggsave("./plots/scrnaseq/sry_xist_counts_spleen.pdf", width = 8, height = 6)
+
+# PCA showing the clustering of the different genotype
+sexing_results %>% 
+  pivot_longer(-c(Sample, Genotype, TotalCounts)) %>%
+  mutate(fraction = value / TotalCounts) %>%
+  dplyr::select(-c(TotalCounts, value)) %>%
+  pivot_wider(values_from = fraction, names_from = name) %>%
+  ggplot(aes(x = XistCounts, SryCounts, col = Genotype)) + geom_jitter(width = 0.00001, height = 0.000001, size = 5) + 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_rect(fill=NA, colour = "black", size=1)) +
+    xlab("Fraction Xist / Total") + 
+    ylab("Fraction Sry / Total") +
+  theme(axis.text.x = element_text(size = 8), axis.text.y = element_text(size = 8))+
+  theme(text=element_text(family="sans"))
+ggsave("./plots/scrnaseq/pca_sry_xist_spleen.pdf", width = 6, height = 4)
+
+```
+

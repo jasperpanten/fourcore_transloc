@@ -1,0 +1,512 @@
+---
+title: "fourcore_subtype_annotation"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+```{r library, include=FALSE}
+
+setwd(paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+
+# # Load library - the below pipeline was run with R 4.1.0
+library(scran)
+library(scater)
+library(ggplot2)
+library(bsub)
+library(ComplexHeatmap)
+library(tidyverse)
+library(celldex)
+library(SingleR)
+
+# needed to run quasr
+bsub_opt$call_Rscript = function(version) {
+  GetoptLong::qq("module load libpng/1.6.37, module load R/@{version}; Rscript")
+}
+
+```
+
+```{r read_data}
+sce <- readRDS("./processed_data/fourcore_sce.cell.types.rds")
+
+# look at the number of genes & cells in our dataset
+dim(sce)
+```
+
+```{r ssss}
+# now, we collapse each cluster into the major annotated cell type based on the singleR annotation
+confusion_table <- table(sce$label, sce$celltype.main)
+
+cluster_to_annotation <- apply(confusion_table, 1, function(x){colnames(confusion_table)[which(x == max(x))][[1]]})
+cluster_to_annotation
+
+confusion_table_fine <- table(sce$label, sce$celltype.fine)
+cluster_fine_to_annotation <- apply(confusion_table_fine, 1, function(x){colnames(confusion_table_fine)[which(x == max(x))][[1]]})
+cluster_fine_to_annotation
+
+per_cluster_celltype <- cluster_fine_to_annotation[sce$label]
+
+## rename clusters more simply
+
+rename_vector <- list(
+  "B cells (B.Fo)" = "B-cell (Fo)", 
+  "B cells (B.MZ)" = "B-cell (Mz)", 
+  "B cells (B.T2)" = "B-cell (T)", 
+  "B cells (preB.FrD)" = "B-cell (pre)", 
+  "Basophils (BA)" = "Basophil", 
+  "Monocytes (MO.6C-II+)" = "Monocytes", 
+  "Monocytes (MO.6C+II-)" = "Monocytes", 
+  "Neutrophils (GN)" = "Neutrophils", 
+  "NK cells (NK.49CI-)" = "NK cells", 
+  "NK cells (NK.49CI+)" = "NK cells", 
+  "NK cells (NK.DAP10-)" = "NK cells", 
+  "T cells (T.8Nve)" = "T-cell (CD8 naive)", 
+  "T cells (T.CD4CONTROL)" = "T-cell (CD4 control)", 
+  "T cells (T.CD4TESTCJ)" = "T-cell (CD4 naive)", 
+  "T cells (T.Tregs)" = "T-cell (regulatory)", 
+  "Tgd (Tgd.VG2+)" = "T-cell (gamma-delta)"
+)
+
+sce$AnnotatedCellType <- unlist(rename_vector[per_cluster_celltype])
+
+plotTSNE(sce, colour_by="celltype.main", text_by="label")
+plotTSNE(sce, colour_by="AnnotatedCellType", text_by="label")
+
+# doublet clusters: 14
+# outlier clusters: 26, 27
+
+data.frame(
+  Tsne1 = reducedDims(sce)$TSNE[,1], 
+  Tsne2 = reducedDims(sce)$TSNE[,2], 
+  CellType = sce$celltype.main, 
+  Sample = sce$Sample, 
+  Cluster = factor(sce$label)
+) %>% ggplot(aes(x = Tsne1, Tsne2, col = Cluster)) + geom_point(size = 0.1) + facet_wrap(~CellType)
+
+data.frame(
+  Tsne1 = reducedDims(sce)$TSNE[,1], 
+  Tsne2 = reducedDims(sce)$TSNE[,2], 
+  CellType = sce$AnnotatedCellType, 
+  Sample = sce$Sample, 
+  Cluster = factor(sce$label)
+) %>% ggplot(aes(x = Tsne1, Tsne2, col = Cluster)) + geom_point(size = 0.1) + facet_wrap(~CellType)
+
+saveRDS(sce, "./processed_data/fourcore_sce.final.rds")
+
+```
+
+```{r asdssss}
+plotTSNE(sce, colour_by = "celltype.main", text_by = "label")
+
+sce$cluster_level_fine_celltype <- unlist(cluster_fine_to_annotation[sce$label])
+plotTSNE(sce, colour_by = "cluster_level_fine_celltype", text_by = "label")
+```
+
+```{r }
+# Manually refine the automatic annotation
+
+cluster_to_annotation_new <- cluster_to_annotation
+cluster_to_annotation_new[[3]] <- "Doublets" # obviously doublets, confirm with doubletFinder after cell type annotation
+cluster_to_annotation_new[[11]] <- "T cells" # NKT and T are not obviously seperate in this level, refine downstream
+cluster_to_annotation_new[[13]] <- "Unclear" # Shouldnt be stem cells, refine next round
+cluster_to_annotation_new[[22]] <- "Erythrocytes" # Annotated as Bcells, but high in Hbb genes
+cluster_to_annotation_new[[23]] <- "B cells" # Put this with B cells
+```
+
+```{r split_and_recluster}
+
+sce$cluster_to_celltype <- unlist(cluster_to_annotation_new[sce$label])
+
+sce_bcells <- sce[,sce$cluster_to_celltype == "B cells"]
+sce_tcells <- sce[,sce$cluster_to_celltype == "T cells"]
+sce_rest <- sce[,sce$cluster_to_celltype %in% c("DC", "Monocytes", "Neutrophils", "Unclear", "Macrophages")]
+
+saveRDS(sce_bcells, "./processed_data/sce_bcells.rds")
+saveRDS(sce_tcells, "./processed_data/sce_tcells.rds")
+saveRDS(sce_rest, "./processed_data/sce_rest.rds")
+
+rm(sce_bcells)
+rm(sce_tcells)
+rm(sce_rest)
+rm(sce)
+```
+
+Now we process the individual celltypes seperately - First myeloid cells
+
+```{r recluster_rest}
+sce_rest <- readRDS("./processed_data/sce_rest.rds")
+
+umap_here <- umap::umap(reducedDims(sce_rest)$corrected)
+
+knn_graph_here <- buildSNNGraph(sce_rest, use.dimred="corrected", k=10)
+clustering_here <- igraph::cluster_louvain(knn_graph_here)$membership
+
+sce_rest$new_cluster <- clustering_here
+reducedDims(sce_rest)[["UMAP"]] <- umap_here$layout
+
+plotUMAP(sce_rest, colour_by = "cluster_to_celltype", text_by = "new_cluster")
+plotUMAP(sce_rest, colour_by = "cluster_to_celltype", text_by = "label")
+```
+
+```{r look_at_markers}
+
+# now, we collapse each cluster into the major annotated cell type based on the singleR annotation
+confusion_table_rest <- table(sce_rest$new_cluster, sce_rest$cluster_to_celltype)
+
+cluster_to_annotation_rest <- apply(confusion_table_rest, 1, function(x){colnames(confusion_table_rest)[which(x == max(x))]})
+cluster_to_annotation_rest
+
+cluster_to_annotation_rest[[1]] <- "Neutrophils (1)"
+cluster_to_annotation_rest[[2]] <- "Neutrophils (2)"
+cluster_to_annotation_rest[[12]] <- "Neutrophils (3)"
+cluster_to_annotation_rest[[13]] <- "Neutrophils (4)"
+
+cluster_to_annotation_rest[[5]] <- "Outliers (1)"
+cluster_to_annotation_rest[[9]] <- "Outliers (2)"
+
+cluster_to_annotation_rest[[3]] <- "Outliers (3)"
+cluster_to_annotation_rest[[11]] <- "Outliers (4)"
+
+cluster_to_annotation_rest[[4]] <- "Monocytes (1)"
+cluster_to_annotation_rest[[6]] <- "Monocytes (2)"
+cluster_to_annotation_rest[[8]] <- "Monocytes (3)"
+cluster_to_annotation_rest[[11]] <- "Monocytes (4)"
+cluster_to_annotation_rest[[14]] <- "Monocytes (5)"
+
+cluster_to_annotation_rest[[7]] <- "Dendritic cells"
+
+sce_rest$final_celltype <- cluster_to_annotation_rest[sce_rest$new_cluster]
+
+saveRDS(sce_rest, "./substep_annotation/sce_rest.rds")
+rm(sce_rest)
+```
+
+Now we process the individual celltypes seperately - T cells
+
+```{r recluster_rest}
+
+bsub_chunk(name = 'reclustering_tcells', packages = c('scran','scater', 'bluster'), memory = 100, working_dir = working_dir,
+            core = 10, hour = 6,{
+  sce_rest <- readRDS("./processed_data/sce_tcells.rds")
+  umap_here <- umap::umap(reducedDims(sce_rest)$corrected)
+
+  knn_graph_here <- buildSNNGraph(sce_rest, use.dimred="corrected", k=3)
+  clustering_here <- igraph::cluster_louvain(knn_graph_here)$membership
+
+  sce_rest$new_cluster <- clustering_here
+  reducedDims(sce_rest)[["UMAP"]] <- umap_here$layout
+
+  saveRDS(sce_rest, "./processed_data/sce_tcells.rds")
+})
+
+sce_rest <- readRDS("./processed_data/sce_tcells.rds")
+
+plotUMAP(sce_rest, colour_by = "cluster_to_celltype", text_by = "new_cluster")
+```
+
+```{r look_at_markers}
+# now, we collapse each cluster into the major annotated cell type based on the singleR annotation
+confusion_table_rest <- table(sce_rest$new_cluster, sce_rest$celltype.fine)
+
+cluster_to_annotation_rest <- unlist(apply(confusion_table_rest, 1, function(x){colnames(confusion_table_rest)[which(x == max(x))][[1]]}))
+cluster_to_annotation_rest
+
+sce_rest$tcelltypes_new <- cluster_to_annotation_rest[sce_rest$new_cluster]
+
+cluster_to_annotation_rest[[1]] <- "T-cell (CD4 naive) (1)"
+cluster_to_annotation_rest[[2]] <- "T-cell (unclear)"
+cluster_to_annotation_rest[[3]] <- "T-cell (CD4 naive) (2)"
+cluster_to_annotation_rest[[4]] <- "T-cell (CD4 regulatory) (1)"
+cluster_to_annotation_rest[[5]] <- "T-cell (CD4 naive) (3)"
+cluster_to_annotation_rest[[6]] <- "T-cell (CD8 naive) (1)"
+cluster_to_annotation_rest[[7]] <- "T-cell (CD8 naive) (2)"
+cluster_to_annotation_rest[[8]] <- "T-cell (CD4 regulatory) (2)"
+cluster_to_annotation_rest[[9]] <- "T-cell (CD4 naive) (4)"
+cluster_to_annotation_rest[[10]] <- "T-cell (CD8 naive) (3)"
+cluster_to_annotation_rest[[11]] <- "T-cell (NKT) (1)"
+cluster_to_annotation_rest[[12]] <- "T-cell (CD8 memory) (1)"
+cluster_to_annotation_rest[[13]] <- "T-cell (CD8 memory) (2)"
+cluster_to_annotation_rest[[14]] <- "T-cell (mitotic)"
+cluster_to_annotation_rest[[15]] <- "T-cell (NKT) (2)"
+cluster_to_annotation_rest[[16]] <- "T-cell (CD8 naive) (4)"
+cluster_to_annotation_rest[[17]] <- "T-cell (CD4 naive) (5)"
+
+sce_rest$final_celltype <- cluster_to_annotation_rest[sce_rest$new_cluster]
+
+saveRDS(sce_rest, "./processed_data/sce_tcells.rds")
+
+rm(sce_rest)
+```
+
+Now we process the individual celltypes seperately - B cells
+
+```{r recluster_rest}
+bsub_chunk(name = 'reclustering_bcells', packages = c('scran','scater', 'bluster'), memory = 20, working_dir = working_dir,
+            core = 10, hour = 6, {
+  sce_rest <- readRDS("./processed_data/sce_bcells.rds")
+  umap_here <- umap::umap(reducedDims(sce_rest)$corrected)
+
+  knn_graph_here <- buildSNNGraph(sce_rest, use.dimred="corrected", k=3)
+  clustering_here <- igraph::cluster_louvain(knn_graph_here)$membership
+
+  sce_rest$new_cluster <- clustering_here
+  reducedDims(sce_rest)[["UMAP"]] <- umap_here$layout
+
+  saveRDS(sce_rest, "./processed_data/sce_bcells.rds")
+})
+
+sce_rest <- readRDS("./processed_data/sce_bcells.rds")
+```
+
+```{r look_at_markers}
+# now, we collapse each cluster into the major annotated cell type based on the singleR annotation
+confusion_table_rest <- table(sce_rest$new_cluster, sce_rest$celltype.fine)
+
+cluster_to_annotation_rest <- unlist(apply(confusion_table_rest, 1, function(x){colnames(confusion_table_rest)[which(x == max(x))]}))
+cluster_to_annotation_rest
+
+sce_rest$bcelltypes_new <- cluster_to_annotation_rest[sce_rest$new_cluster]
+
+plotUMAP(sce_rest, colour_by = "bcelltypes_new", text_by = "new_cluster")
+plotUMAP(sce_rest, colour_by = "bcelltypes_new", text_by = "label")
+
+cluster_to_annotation_rest[[1]] <- "B-cell (marg zone) (1)"
+cluster_to_annotation_rest[[2]] <- "B-cell (follicular) (2)"
+cluster_to_annotation_rest[[3]] <- "B-cell (follicular) (1)"
+cluster_to_annotation_rest[[4]] <- "B-cell (transitional) (1)"
+cluster_to_annotation_rest[[5]] <- "B-cell (follicular) (2)"
+cluster_to_annotation_rest[[6]] <- "B-cell (follicular) (3)"
+cluster_to_annotation_rest[[7]] <- "B-cell (follicular) (4)"
+cluster_to_annotation_rest[[8]] <- "B-cell (mitotic) (1)" # this seems off... double check
+cluster_to_annotation_rest[[9]] <- "B-cell (follicular) (3)"
+cluster_to_annotation_rest[[10]] <- "B-cell (transitional) (2)"
+cluster_to_annotation_rest[[11]] <- "B-cell (follicular)"
+cluster_to_annotation_rest[[12]] <- "B-cell (Plasma)"
+cluster_to_annotation_rest[[13]] <- "B-cell (follicular) (1)"
+cluster_to_annotation_rest[[14]] <- "B-cell (follicular) (7)"
+cluster_to_annotation_rest[[15]] <- "B-cell (follicular) (2)"
+cluster_to_annotation_rest[[16]] <- "B-cell (follicular) (8)"
+cluster_to_annotation_rest[[17]] <- "B-cell (mitotic) (2)"
+cluster_to_annotation_rest[[18]] <- "B-cell (pre)"
+cluster_to_annotation_rest[[19]] <- "B-cell (follicular)"
+cluster_to_annotation_rest[[20]] <- "B-cell (Apoe)"
+cluster_to_annotation_rest[[21]] <- "B-cell (Outliers, NK)"
+cluster_to_annotation_rest[[22]] <- "B-cell (Outliers, NK)"
+
+sce_rest$final_celltype <- cluster_to_annotation_rest[sce_rest$new_cluster]
+
+saveRDS(sce_rest, "./substep_annotation/sce_bcells.rds")
+
+rm(sce_rest)
+```
+
+Finally, justify the cluster assignments on various levels: 
+
+```{r }
+rm(sce_bcells)
+rm(sce_tcells)
+rm(sce_rest)
+rm(sce)
+
+# add the refined cell types
+sce_rest <- readRDS("./processed_data/sce_rest.rds")
+final_rest <- setNames(sce_rest$final_celltype, colnames(sce_rest))
+rm(sce_rest)
+
+sce_rest <- readRDS("./processed_data/sce_bcells.rds")
+final_bcells <- setNames(sce_rest$final_celltype, colnames(sce_rest))
+rm(sce_rest)
+
+sce_rest <- readRDS("./processed_data/sce_tcells.rds")
+final_tcells <- setNames(sce_rest$final_celltype, colnames(sce_rest))
+rm(sce_rest)
+
+final_celltypes <- c(final_rest, final_bcells, final_tcells)
+
+sce <- readRDS("./processed_data/sce.cell.types.rds")
+celltypes_here <- setNames(sce$celltype.main, colnames(sce))
+celltypes_here[names(final_celltypes)] <- final_celltypes
+
+sce$final_celltypes <- celltypes_here
+
+plotTSNE(sce, colour_by = "final_celltypes")
+
+final_celltypes_reduced <- gsub(" \\(\\d*\\)$", "", sce$final_celltypes)
+sce$final_celltypes_med <- final_celltypes_reduced
+
+saveRDS(sce, "./processed_data/final.sce.rds")
+```
+
+```{r asdaaaa}
+
+sce <- readRDS("./processed_data/final.sce.rds")
+
+sample.cells <- sample(1:ncol(sce), 50000)
+sce.small <- sce[,sample.cells]
+
+rm(sce)
+
+# We preprocessed single cell data and used ImmGene to perform a first- and second-level annotation
+# We then manually curated some cluster annotations, including a cluster likely composed of doublets, 
+# which can be confirmed by doublet scoring
+
+# ADD THIS HERE
+
+# We also identified a cluster with high expression of Hbb-related genes, likely residual eryhtrocytes
+plotTSNE(sce.small, colour_by = "Hbb-bs", text_by = "label") + 
+  scale_color_gradient(low = "grey", high = "red")
+
+# We then seperated B-cells, T-cells, NK cells and other (mainly myeloid) cell types and performed re-clustering
+# to obtain a final set of XXX clusters at the sub-celltype level
+# First, we verified appropriate marker gene expression at the first level annotation: 
+
+confusion_table <- table(sce.small$label, sce.small$celltype.main)
+cluster_to_annotation <- apply(confusion_table, 1, function(x){colnames(confusion_table)[which(x == max(x))]})
+cluster_to_annotation
+
+cluster_to_annotation_new <- cluster_to_annotation
+cluster_to_annotation_new[[3]] <- "Doublets" # obviously doublets, confirm with doubletFinder after cell type annotation
+cluster_to_annotation_new[[11]] <- "T cells" # NKT and T are not obviously seperate in this level, refine downstream
+cluster_to_annotation_new[[13]] <- "Unclear" # Shouldnt be stem cells, refine next round
+cluster_to_annotation_new[[22]] <- "Erythrocytes" # Annotated as Bcells, but high in Hbb genes
+cluster_to_annotation_new[[23]] <- "B cells" # Put this with B cells
+
+genes_plot <- c("Cd3e", "Cd4", "Cd8a", # T-cells
+                "Igkc", "Cd79a", "Cd19", # B-cells
+                "Gzma", "Nkg7")
+
+plotTSNE(sce.small, colour_by = "Xist") + 
+  scale_color_gradient(low = "grey", high = "red")
+
+genes_plot <- factor(genes_plot, levels = genes_plot)
+
+t(as.matrix(logcounts(sce.small[as.character(genes_plot), ]))) %>%
+  data.frame() %>%
+  add_column("Cluster" = sce.small$label) %>%
+  add_column("CellType" = cluster_to_annotation_new[sce.small$label]) %>%
+  add_column("Cluster_Celltype" = paste0(.$Cluster, " (", .$CellType, ")")) %>% 
+  mutate(Cluster_Celltype = factor(Cluster_Celltype, 
+         levels = unique(.$Cluster_Celltype)[order(gsub(" \\(|\\)|[0-9]*", "", unique(.$Cluster_Celltype)))])) %>%
+  pivot_longer(-c(Cluster, CellType, Cluster_Celltype)) %>%
+  ggplot(aes(x = Cluster_Celltype, y = value, fill = CellType)) + geom_boxplot(outlier.color = NA) + 
+  stat_summary() + facet_grid(~ factor(name, levels = genes_plot),  scales = "free") + 
+  theme_classic() + coord_flip()
+
+# We save the first level of annotation and split up the dataset into T, B and myeloid (and other) cells
+# Now, we use the second level ImmGen-annotation to specify immune cell subtypes on the subclustered dataset
+
+# First B cells
+sce.small_bcells <- sce.small[,grepl("B-cell", sce.small$final_celltypes)]
+plotTSNE(sce.small_bcells, colour_by = "final_celltypes_med")
+plotTSNE(sce.small_bcells, colour_by = "final_celltypes", text_by = "final_celltypes")
+plotTSNE(sce.small, colour_by = "final_celltypes", text_by = "final_celltypes")
+
+celltype_to_immgen <- table(sce.small_bcells$final_celltypes, sce.small_bcells$celltype.fine)
+celltype_to_immgen_conversion <- apply(celltype_to_immgen, 1, function(x){colnames(celltype_to_immgen)[which(x == max(x))][[1]]})
+
+celltype_to_immgen %>%
+  data.frame() %>%
+  mutate(Var2 = as.character(Var2)) %>%
+  group_by(Var1) %>%
+  do(add_column(., is_majority = 1:length(.$Freq) %in% order(.$Freq, decreasing = T)[1:2])) %>%
+  mutate(Var2 = replace(Var2, !is_majority, "Rest")) %>%
+  ungroup() %>%
+  ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(position = "fill", stat = "identity") + 
+  coord_flip() + theme_classic()
+
+genes_plot <-  c("Cd74", "Igkc", "Ebf1", "Mzb1", "Jchain", "Apoe", "Mki67", "Top2a", "Vpreb3", "Cr2", "Cd79a")
+genes_plot <- factor(genes_plot, levels = genes_plot)
+
+t(as.matrix(logcounts(sce.small_bcells[as.character(genes_plot), ]))) %>%
+  data.frame() %>%
+  add_column("Cluster" = sce.small_bcells$final_celltypes) %>%
+  add_column("CellType" = unlist(celltype_to_immgen_conversion[sce.small_bcells$final_celltypes])) %>%
+  add_column("Cluster_Celltype" = paste0(.$Cluster, " -- (", .$CellType, ")")) %>% 
+  mutate(Cluster_Celltype = factor(Cluster_Celltype, 
+         levels = unique(.$Cluster_Celltype)[order(gsub(" -- \\(|\\)|[0-9]*", "", unique(.$Cluster_Celltype)))])) %>%
+  pivot_longer(-c(Cluster, CellType, Cluster_Celltype)) %>%
+  ggplot(aes(x = Cluster_Celltype, y = value, fill = CellType)) + geom_boxplot(outlier.color = NA) + 
+  stat_summary(fun = "median") + facet_grid( ~factor(name, levels = genes_plot),  scales = "free") + 
+  theme_classic() + coord_flip()
+
+# Second T cells
+sce.small_tcells <- sce.small[,grepl("T-cell|NK cells", sce.small$final_celltypes)]
+plotTSNE(sce.small_tcells, colour_by = "final_celltypes_med")
+
+celltype_to_immgen <- table(sce.small_tcells$final_celltypes, sce.small_tcells$celltype.fine)
+celltype_to_immgen_conversion <- apply(celltype_to_immgen, 1, function(x){colnames(celltype_to_immgen)[which(x == max(x))][[1]]})
+
+celltype_to_immgen %>%
+  data.frame() %>%
+  mutate(Var2 = as.character(Var2)) %>%
+  group_by(Var1) %>%
+  do(add_column(., is_majority = 1:length(.$Freq) %in% order(.$Freq, decreasing = T)[1:2])) %>%
+  mutate(Var2 = replace(Var2, !is_majority, "Rest")) %>%
+  ungroup() %>%
+  ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(position = "fill", stat = "identity") + 
+  coord_flip() + theme_classic()
+
+genes_plot <-  c("Cd4", "Cd8a", "Ikzf1", "Lef1", "Nkg7", "Gzma",
+                 "Izumo1r", "Dapl1", "Id2", "Cxcr3", "Ccl5", 
+                 "Tox", "Gzmb", "Top2a", "Mki67")
+genes_plot <- factor(genes_plot, levels = genes_plot)
+
+t(as.matrix(logcounts(sce.small_tcells[as.character(genes_plot), ]))) %>%
+  data.frame() %>%
+  add_column("Cluster" = sce.small_tcells$final_celltypes) %>%
+  add_column("CellType" = unlist(celltype_to_immgen_conversion[sce.small_tcells$final_celltypes])) %>%
+  add_column("Cluster_Celltype" = paste0(.$Cluster, " -- (", .$CellType, ")")) %>% 
+  mutate(Cluster_Celltype = factor(Cluster_Celltype, 
+         levels = unique(.$Cluster_Celltype)[order(gsub(" -- \\(|\\)|[0-9]*", "", unique(.$Cluster_Celltype)))])) %>%
+  pivot_longer(-c(Cluster, CellType, Cluster_Celltype)) %>%
+  ggplot(aes(x = Cluster_Celltype, y = value, fill = CellType)) + geom_boxplot(outlier.color = NA) + 
+  stat_summary(fun = "median") + facet_grid( ~factor(name, levels = genes_plot),  scales = "free") + 
+  theme_classic() + coord_flip()
+
+# Some clusters require revisiting here: NKT vs CD8 mem, CD4 naive (5)
+
+# Now we look at the myeloid cells
+
+sce.small_rest <- sce.small[,!grepl("T-cell|B-cell|NK cells", sce.small$final_celltypes)]
+plotTSNE(sce.small_rest, colour_by = "final_celltypes")
+
+celltype_to_immgen <- table(sce.small_rest$final_celltypes, sce.small_rest$celltype.fine)
+celltype_to_immgen_conversion <- apply(celltype_to_immgen, 1, function(x){colnames(celltype_to_immgen)[which(x == max(x))][[1]]})
+
+i = 1
+rownames(celltype_to_immgen)[[i]]
+sort(celltype_to_immgen[i, ][celltype_to_immgen[i, ] > 5])
+
+celltype_to_immgen %>%
+  data.frame() %>%
+  mutate(Var2 = as.character(Var2)) %>%
+  group_by(Var1) %>%
+  do(add_column(., is_majority = 1:length(.$Freq) %in% order(.$Freq, decreasing = T)[1:2])) %>%
+  mutate(Var2 = replace(Var2, !is_majority, "Rest")) %>%
+  ungroup() %>%
+  ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(position = "fill", stat = "identity") + 
+  coord_flip() + theme_classic()
+
+genes_plot <-  c("Cd68", "Ccl6", "Irf8", "Cxcr2", "S100a8", "Siglech", "Tyrobp", "Cybb", "Itgam", 
+                 "Ccr1", "Cebpa", "Itgax", "Cebpb", "Siglec1", "Tlr7")
+genes_plot <- factor(genes_plot, levels = genes_plot)
+
+t(as.matrix(logcounts(sce.small_rest[as.character(genes_plot), ]))) %>%
+  data.frame() %>%
+  add_column("Cluster" = sce.small_rest$final_celltypes) %>%
+  add_column("CellType" = unlist(celltype_to_immgen_conversion[sce.small_rest$final_celltypes])) %>%
+  add_column("Cluster_Celltype" = paste0(.$Cluster, " -- (", .$CellType, ")")) %>% 
+  mutate(Cluster_Celltype = factor(Cluster_Celltype, 
+         levels = unique(.$Cluster_Celltype)[order(gsub(" -- \\(|\\)|[0-9]*", "", unique(.$Cluster_Celltype)))])) %>%
+  pivot_longer(-c(Cluster, CellType, Cluster_Celltype)) %>%
+  ggplot(aes(x = Cluster_Celltype, y = value, fill = CellType)) + geom_boxplot(outlier.color = NA) + 
+  stat_summary(fun = "median") + facet_grid( ~factor(name, levels = genes_plot),  scales = "free") + 
+  theme_classic() + coord_flip()
+
+```

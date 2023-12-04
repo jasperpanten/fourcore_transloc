@@ -1,0 +1,302 @@
+---
+title: "fourcore_subtype_annotation"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+```{r library, include=FALSE}
+
+setwd(paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+
+library(scran)
+library(scater)
+library(ggplot2)
+library(bsub)
+library(ComplexHeatmap)
+library(tidyverse)
+library(celldex)
+library(SingleR)
+
+# needed to run quasr
+bsub_opt$call_Rscript = function(version) {
+  GetoptLong::qq("module load libpng/1.6.37, module load R/@{version}; Rscript")
+}
+
+```
+
+
+```{r prepare data}
+
+# load data
+sce <- readRDS("./processed_data/fourcore_sce.final.rds")
+
+# add genotype information (do that before when rerunning)
+genotype_metadata <- read_csv("./metadata_rna_four_core.csv") %>%
+  mutate(sample_identifier = paste0(seq_ids, "_", ILSE_NO))
+
+genotype_annotation <- genotype_metadata %>% pull(GENOTYPE, name = sample_identifier)
+sce$Genotype <- genotype_annotation[sce$Sample]
+
+# clusters out: -- likely doublets, outliers
+clusters_out <- c(14, 26, 27)
+sce <- sce[,!sce$label %in% clusters_out]
+
+# aggregate across samples
+sce.aggregate <- aggregateAcrossCells(sce, DataFrame(Sample = sce$Sample, Library = sce$Library))
+
+# add chromosome annotationto the aggregated across samples sce
+library('AnnotationHub')
+ah <- AnnotationHub()
+query(ah, c("Mus musculus", "Ensembl", "v97"))
+ensdb <- ah[["AH73905"]]
+
+chromosome <- mapIds(ensdb,
+    keys = rownames(sce.aggregate),
+    keytype = "SYMBOL",
+    column = "SEQNAME")
+rowData(sce.aggregate)$chromosome <- chromosome
+
+sce.aggregate <- sce.aggregate[!is.na(rowData(sce.aggregate)$chromosome), ]
+
+# correct the one samples that are swapped in the aggregated across samples sce
+swapped_sample1 <- "87884148_34406" # annotated as XYF, actually XXF
+swapped_sample2 <- "87882871_34406" # annotated as XXF, actually XYF
+
+sce.aggregate[,sce.aggregate$Sample == swapped_sample1]$Genotype <- "F1_FCG_XXF"
+sce.aggregate[,sce.aggregate$Sample == swapped_sample2]$Genotype <- "F1_FCG_XYF"
+
+# add the chromosomal and gonadal info to the aggregated across samples sce
+sce.aggregate$Chromosomal <- ifelse(grepl("XX", sce.aggregate$Genotype), "female", "male")
+sce.aggregate$Gonadal <- ifelse(grepl("F$", sce.aggregate$Genotype), "female", "male")
+
+# correct the one samples that are swapped in the original sce 
+swapped_sample1 <- "87884148_34406" # annotated as XYF, actually XXF
+swapped_sample2 <- "87882871_34406" # annotated as XXF, actually XYF
+
+sce[,sce$Sample == swapped_sample1]$Genotype <- "F1_FCG_XXF"
+sce[,sce$Sample == swapped_sample2]$Genotype <- "F1_FCG_XYF"
+
+# aggregate across cell type
+sce.aggregate.celltype <- aggregateAcrossCells(sce, DataFrame(Sample = sce$Sample, Library = sce$Library, CellType = sce$AnnotatedCellType))
+sce.aggregate.celltype$Library <- factor(sce.aggregate.celltype$Library)
+
+# add the chromosomal and gonadal info to the aggregated across cell type sce
+sce.aggregate.celltype$Chromosomal <- ifelse(grepl("XX", sce.aggregate.celltype$Genotype), "female", "male")
+sce.aggregate.celltype$Gonadal <- ifelse(grepl("F$", sce.aggregate.celltype$Genotype), "female", "male")
+
+```
+
+
+```{r deg_analysis}
+
+# degs
+
+library(DESeq2)
+
+deseq_dataset <- DESeqDataSet(sce.aggregate, design = ~ Library + Genotype)
+deseq_dataset <- estimateSizeFactors(deseq_dataset)
+deseq_dataset <- DESeq(deseq_dataset, test = "LRT", reduced = ~ Library)
+
+test <- results(deseq_dataset)
+
+data.frame(head(test[order(test$padj), ], n = 20)) # mostly Th genes (makes sense)
+
+# degs for individual cell types
+
+run_deseq_lrt_per_celltype <- function(sce, celltype, cutoff = 20){
+  deseq_dataset <- DESeqDataSet(sce, design = ~ Library + Genotype)
+  deseq_dataset <- deseq_dataset[,deseq_dataset$CellType == celltype]
+  deseq_dataset <- deseq_dataset[rowSums(counts(deseq_dataset)) / ncol(deseq_dataset) > cutoff, ]
+  deseq_dataset <- estimateSizeFactors(deseq_dataset)
+  deseq_dataset <- DESeq(deseq_dataset, test = "LRT", reduced = ~ Library)
+  res <- results(deseq_dataset)
+  data.frame(res[order(res$padj), ]) %>% rownames_to_column("Gene")
+}
+
+all_celltype_res <- lapply(unique(sce.aggregate.celltype$CellType), function(x){print(x); run_deseq_lrt_per_celltype(sce.aggregate.celltype, x)})
+names(all_celltype_res) <- unique(sce.aggregate.celltype$CellType)
+
+total_results <- do.call('rbind', lapply(names(all_celltype_res), function(x){
+  data = cbind("CellType" = x, all_celltype_res[[x]]) %>% tibble()
+}))
+
+total_results %>%
+  dplyr::filter(!is.na(padj)) %>%
+  mutate(is_significant = ifelse(padj < 0.1, "sig", "not_sig")) %>%
+  group_by(CellType, is_significant) %>% 
+  summarize(n_genes = n()) %>% 
+  pivot_wider(names_from = is_significant, values_from = n_genes) %>%
+  ggplot(aes(x = reorder(CellType, sig), y = sig / (sig + not_sig))) + geom_point() + coord_flip() + ggrepel::geom_text_repel(aes(label = sig)) + 
+    xlab("") + ylab("Fraction of tested genes significant")
+
+```
+
+
+```{r deg_analysis_multivariate}
+
+# multivariate model
+
+run_deseq_wald_per_celltype <- function(sce, celltype, contrast, cutoff = 20){
+  #deseq_dataset <- DESeqDataSet(sce, design = ~ Library + Gonadal + Chromosomal)
+  deseq_dataset <- DESeqDataSet(sce, design = ~ Library + Gonadal + Chromosomal)
+  deseq_dataset <- deseq_dataset[,deseq_dataset$CellType == celltype]
+  deseq_dataset <- deseq_dataset[rowSums(counts(deseq_dataset)) / ncol(deseq_dataset) > cutoff, ]
+  deseq_dataset <- estimateSizeFactors(deseq_dataset)
+  deseq_dataset <- DESeq(deseq_dataset)
+  
+  res <- results(deseq_dataset, contrast = contrast) %>% data.frame() %>% rownames_to_column("Gene")
+  res <- cbind("CellType" = celltype, "Contrast" = contrast[[1]], res)
+  data.frame(res[order(res$padj), ])
+}
+
+all_celltype_res_chrom <- lapply(unique(sce.aggregate.celltype$CellType), function(x){print(x); run_deseq_wald_per_celltype(sce.aggregate.celltype, x, c("Chromosomal", "female", "male"))})
+names(all_celltype_res_chrom) <- unique(sce.aggregate.celltype$CellType)
+total_results_chrom <- do.call('rbind', all_celltype_res_chrom) %>% tibble()
+
+all_celltype_res_gonadal <- lapply(unique(sce.aggregate.celltype$CellType), function(x){print(x); run_deseq_wald_per_celltype(sce.aggregate.celltype, x, c("Gonadal", "female", "male"))})
+names(all_celltype_res_gonadal) <- unique(all_celltype_res_gonadal$CellType)
+total_results_gonadal <- do.call('rbind', all_celltype_res_gonadal) %>% tibble()
+
+# add gene and chromosome information
+library(EnsDb.Mmusculus.v79)
+all_genes <- genes(EnsDb.Mmusculus.v79) %>% data.frame() %>% dplyr::select(c("symbol", "seqnames")) %>% rename("Gene" = symbol, "Chromosome" = seqnames) %>% pull(Chromosome, name = Gene)
+
+total_results <- rbind(total_results_gonadal, total_results_chrom) %>% 
+  mutate(Chromosome = all_genes[Gene])
+
+total_results %>%
+  dplyr::filter(!is.na(padj)) %>%
+  mutate(is_significant = ifelse(padj < 0.1, "sig", "not_sig")) %>%
+  mutate(SexChromosome = ifelse(Chromosome %in% c("X", "Y"), "SexChromosome", "Autosome")) %>% 
+  group_by(CellType, is_significant, Contrast, SexChromosome) %>% 
+  summarize(n_genes = n()) %>% 
+  pivot_wider(names_from = is_significant, values_from = n_genes) %>%
+  #dplyr::filter(CellType == "Monocytes") %>%
+  ggplot(aes(x = reorder(CellType, sig), y = sig / (sig + not_sig), col = Contrast)) + geom_point() + coord_flip() + ggrepel::geom_text_repel(aes(label = sig)) + 
+    facet_wrap( ~ SexChromosome) + ylim(c(-0.01, 0.2))
+
+total_results %>% 
+  dplyr::filter(Chromosome %in% c("X")) %>% 
+  dplyr::filter(!Gene %in% c("Xist", "Tsix")) %>%
+  dplyr::arrange(padj) %>% 
+  data.frame() %>%
+  head(n = 40)
+
+total_results %>% 
+  dplyr::filter(Gene %in% c("Cxcr3"))
+
+total_results %>% 
+    dplyr::filter(Chromosome %in% c("X")) %>%
+    dplyr::filter(Contrast == "Chromosomal") %>%
+    dplyr::arrange(padj) %>% View()
+
+### plot individual genes
+sce.aggregate.celltype <- computeSumFactors(sce.aggregate.celltype)
+sce.aggregate.celltype <- logNormCounts(sce.aggregate.celltype)
+
+# duplicated genes
+gene <- c("Tmsb4x", "Tlr8", "Tlr7", "Prps2", "Msl3", "Arhgap6", "Hccs", "Amelx", "Frmpd4")
+
+# change cell labels
+cell.label <- c(
+"B-cell (Fo)"="B-Fo",      
+"B-cell (Mz)"="B-Mz",
+"B-cell (pre)"="B-pre",           
+"B-cell (T)"="B-Tran",  
+"T-cell (CD4 control)"="CD4ctrl",
+"T-cell (CD8 naive)"="CD8naiv",
+"T-cell (CD4 naive)"="CD4naiv", 
+"T-cell (regulatory)"="T-reg",
+"T-cell (gamma-delta)"="T-gd",
+"NK cells"="NK",
+"Basophil"="Baso",         
+"Neutrophils"="Neutro",
+"Monocytes"="Mono"
+)
+
+gene = "Tmsb4x"
+data.frame(
+  celltype = sce.aggregate.celltype$AnnotatedCellType, 
+  genotype = sce.aggregate.celltype$Genotype, 
+  expression = as.numeric(logcounts(sce.aggregate.celltype[gene, ])),
+  gene=gene
+) %>%
+  mutate(genotype= factor(genotype, levels = c("F1_FCG_XYM", "F1_FCG_XXM",  "F1_FCG_XYF","F1_FCG_XXF"))) %>%
+  ggplot(aes(x = reorder(celltype, expression), col = genotype, y = expression)) + 
+  geom_jitter(position = position_dodge(width = 1), size=0.1) + 
+  stat_summary(position = position_dodge(width = 1), size=0.2) + 
+  coord_flip() + 
+  ggtitle(gene) +
+  geom_rangeframe(colour = "black", size=1) +
+  theme_tufte() +
+  theme(axis.ticks.length = unit(5, "pt")) +
+  scale_x_discrete( labels=cell.label) +
+  labs(x="",y="Expression level") +
+  theme(axis.text.x = element_text(vjust=1, size = 8), axis.text.y = element_text(size = 8), plot.title = element_text(face = "bold"), legend.position="none") +
+  theme(text=element_text(family="sans"))+
+  facet_grid(reorder(celltype, -expression)~., scales = "free", space = "free") + #facet by group
+  theme(strip.background = element_blank(), #remove background for facet labels
+        panel.border = element_rect(colour = "black", fill = NA), #add black border
+        panel.spacing = unit(0, "lines")) #remove space between facets
+
+gene_Ychrom <- c("Eif2s3y", "Ddx3y", "Uty", "Kdm5d")
+
+gene = "Eif2s3y"
+data.frame(
+  celltype = sce.aggregate.celltype$AnnotatedCellType, 
+  genotype = sce.aggregate.celltype$Genotype, 
+  expression = as.numeric(logcounts(sce.aggregate.celltype[gene, ])),
+  gene=gene
+) %>%
+  mutate(genotype= factor(genotype, levels = c("F1_FCG_XXF", "F1_FCG_XYF", "F1_FCG_XXM", "F1_FCG_XYM"))) %>%
+  ggplot(aes(x = genotype, y = expression, fill=genotype)) + 
+  geom_boxplot(outlier.color = NA, width=0.7, position=position_dodge(width=0.8)) + 
+  geom_jitter(color="black", size=0.5, position=position_dodge(width=0.8))  + 
+  ggtitle(gene) +
+  geom_rangeframe(colour = "black", size=1) +
+  theme_tufte() +
+  theme(axis.ticks.length = unit(5, "pt")) +
+  scale_x_discrete( labels=cell.label) +
+  labs(x="",y="Expression level") +
+  theme(axis.text.x = element_text(vjust=1, size = 8), axis.text.y = element_text(size = 8), plot.title = element_text(face = "bold"), legend.position="none") +
+  theme(text=element_text(family="sans"))
+
+# look at interaction effects with LRT test - RESULT: there are basically no interaction effects
+
+run_deseq_lrt_interaction_per_celltype <- function(sce, celltype, cutoff = 20){
+  # deseq_dataset <- DESeqDataSet(sce, design = ~ Library + Gonadal + Chromosomal + Gonadal:Chromosomal)
+  deseq_dataset <- DESeqDataSet(sce, design = ~ Library + Gonadal * Chromosomal)
+  deseq_dataset <- deseq_dataset[,deseq_dataset$CellType == celltype]
+  deseq_dataset <- deseq_dataset[rowSums(counts(deseq_dataset)) / ncol(deseq_dataset) > cutoff, ]
+  deseq_dataset <- estimateSizeFactors(deseq_dataset)
+  deseq_dataset <- DESeq(deseq_dataset, test = "LRT", reduced = ~ Library + Gonadal + Chromosomal)
+  res <- results(deseq_dataset)
+  data.frame(res[order(res$padj), ]) %>% rownames_to_column("Gene")
+}
+
+all_celltype_res_interaction <- lapply(unique(sce.aggregate.celltype$CellType), function(x){print(x); run_deseq_lrt_interaction_per_celltype(sce.aggregate.celltype, x)})
+names(all_celltype_res_interaction) <- unique(sce.aggregate.celltype$CellType)
+
+total_results_interaction <- do.call('rbind', lapply(names(all_celltype_res_interaction), function(x){
+  data = cbind("CellType" = x, all_celltype_res_interaction[[x]]) %>% tibble()
+}))
+
+total_results_interaction %>%
+  dplyr::filter(!is.na(padj)) %>%
+  mutate(is_significant = ifelse(padj < 0.1, "sig", "not_sig")) %>%
+  group_by(CellType, is_significant) %>% 
+  summarize(n_genes = n()) %>% 
+  pivot_wider(names_from = is_significant, values_from = n_genes) %>%
+  ggplot(aes(x = reorder(CellType, sig), y = sig / (sig + not_sig))) + geom_point() + coord_flip() + ggrepel::geom_text_repel(aes(label = sig)) + 
+    xlab("") + ylab("Fraction of tested genes significant")
+
+total_results_interaction %>% 
+  dplyr::arrange(padj) %>% head(n = 20)
+```

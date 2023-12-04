@@ -1,0 +1,357 @@
+---
+title: "integrate_and_filter_fourcore_dataset"
+output: html_document
+df_print: paged
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+#Load library - the below pipeline was run with R 4.1.0
+```{r library, include=FALSE}
+
+setwd(paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+
+library(DropletUtils)
+library(scran)
+library(reshape2)
+library(scater)
+library(ggplot2)
+library(Rtsne)
+library(irlba)
+library(RColorBrewer)
+library(viridis)
+library(pheatmap)
+library(rtracklayer)
+library(gridExtra)
+library(writexl)
+library(PCAtools)
+library(BiocSingular)
+library(scuttle)
+library(batchelor)
+library(org.Mm.eg.db)
+library(limma)
+library(celldex)
+library(bluster)
+library(edgeR)
+library(robustbase)
+library(tidyverse)
+
+```
+
+```{r read_data_automatically}
+
+metadata <- read_csv("./metadata/processed_metadata/metadata_rna_four_core.csv")
+
+metadata_relevant <- metadata %>% 
+  mutate(IndividualILSE = paste0(seq_ids, "_", ILSE_NO))
+
+samples_read <- list.files("./cellranger_output/")
+samples_read <- samples_read[samples_read != "cellranger_done"]
+samples_read <- samples_read[!grepl("^__", samples_read)]
+
+metadata_relevant <- data.frame(metadata_relevant[metadata_relevant$IndividualILSE %in% samples_read, ])
+rownames(metadata_relevant) <- metadata_relevant$IndividualILSE
+
+# read data into sce objects
+individual_datasets <- lapply(metadata_relevant$IndividualILSE, function(sample_id){
+  sample_id = as.character(sample_id)
+  data_path <- "../../ximmune_10x_alignment/cellranger_output/"
+  data <- read10xCounts(file.path(data_path, sample_id, "/outs/filtered_feature_bc_matrix/"))
+  data$Sample <- paste0(metadata_relevant[sample_id, ]$IndividualILSE)
+  data$Strain <- metadata_relevant[sample_id, ]$STRAIN
+  data$CrossDirection <-  metadata_relevant[sample_id, ]$CrossDirection
+  data$OriginalName <- metadata_relevant[sample_id, ]$Sample_ID
+  data$AgeWeeks <- metadata_relevant[sample_id, ]$Age.in.weeks.at.collection
+  data$Age <- metadata_relevant[sample_id, ]$Age
+  data$Library <- metadata_relevant[sample_id, ]$ILSE_NO
+  data$ExperimentDate <- metadata_relevant[sample_id, ]$Date.of.collection
+  data$Sex <- metadata_relevant[sample_id, ]$Sex
+  return(data)
+})
+
+saveRDS(individual_datasets, "./processed_data/fourcore_individual_datasets.rds")
+
+```
+
+# Merge all datasets 
+```{r Merge all datasets}
+
+#merge all the individual sce 
+sce.all.subset <- do.call("cbind", individual_datasets)
+colnames(sce.all.subset) <- paste0(sce.all.subset$Sample, "_", sce.all.subset$Barcode)
+rownames(sce.all.subset) <- rowData(sce.all.subset)$Symbol
+
+saveRDS(sce.all.subset, "./processed_data/fourcore_raw_merged_dataset.rds")
+
+rm(list = c("individual_datasets"))
+```
+
+# Filtering - Adaptive Parameters - it is run sample by sample separatly
+```{r Filtering - Adaptive Parameters}
+
+# Save statistics on these libraries before filtering
+good_stats <- melt(table(colData(sce.all.subset)$Sample))
+good_stats <- good_stats[good_stats$value > 0,]
+good.stats.df <- data.frame(row.names = good_stats$Var1,
+                            Sample = good_stats$Var1,
+                            No_cells = good_stats$value)
+
+# Calculate QC metrics
+is.mito <- grepl("^mt-", rownames(sce.all.subset))
+QC.metrics.good <- perCellQCMetrics(sce.all.subset, subsets=list(Mito=is.mito))
+colData(sce.all.subset) <- cbind(colData(sce.all.subset), QC.metrics.good)
+
+#it is still applying a nmads of 4 even if 2 has been specified because the data is in the command perCellQCMetrics
+lib <- isOutlier(QC.metrics.good$sum, log=TRUE, nmads = 2, type="lower", batch=sce.all.subset$Sample)
+nexprs <- isOutlier(QC.metrics.good$detected, log=TRUE, nmads = 2, type="lower", batch=sce.all.subset$Sample)
+mitos <- isOutlier(QC.metrics.good$subsets_Mito_percent, nmads = 2, type="higher", batch=sce.all.subset$Sample)
+discard.tot <- lib | nexprs | mitos
+
+# Outlier detection (adaptive thresholds)
+discard.final <- quickPerCellQC(QC.metrics.good,
+                                percent_subsets = c("subsets_Mito_percent"),
+                                batch=sce.all.subset$Sample)
+discard.final[QC.metrics.good$subsets_Mito_percent > 5, ]$discard <- TRUE
+colData(sce.all.subset) <- cbind(colData(sce.all.subset), discard.final)
+```
+
+# Diagnostic plots before filtering
+```{r Diagnostic plots before filtering, echo=FALSE}
+#subset randomly 100.000 cells out of the 450000
+sample.cells <- sample(1:ncol(sce.all.subset), 100000)
+sce.small <- sce.all.subset[,sample.cells]
+
+# UMI counts - the samples order in the x axis of the two plot below is not the same
+plotColData(sce.small, x="Sample", y="sum", colour_by="discard") +
+  scale_y_log10() +
+  labs(x="Sample",y="UMI counts", title="UMI counts") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1, size = 6),
+        plot.title = element_text(face = "bold")) +
+  scale_x_discrete(limits = good.stats.df$Sample)
+ggsave("./plots/scrnaseq/UMI_cutoff_adaptive.pdf")
+
+ggcells(sce.small, aes(x = Sample, y = sum)) + 
+  geom_violin(size=1)+
+    geom_point(shape=16, position=position_jitter(0.2), size=0.1, aes(color=factor(discard)))+
+    scale_y_log10() +
+    theme_classic() +
+    labs(x="Sample",y="UMI counts", title="UMI counts") +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1, size = 6),  plot.title = element_text(face = "bold"))+
+    theme(text=element_text(family="sans"))
+ggsave("./plots/scrnaseq/UMI_cutoff_adaptive_violin.pdf")
+
+# Detected genes
+plotColData(sce.small, x="Sample", y="detected", colour_by="discard") +
+  scale_y_log10() + ggtitle("Detected genes") +
+  labs(x="Sample",y="Number of detected genes", title="Detected features") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1, size = 6),
+        plot.title = element_text(face = "bold")) +
+  scale_x_discrete(limits = good.stats.df$Sample)
+ggsave("./plots/scrnaseq/Genes_cutoff_adaptive.pdf")
+
+ggcells(sce.small, aes(x = Sample, y = detected)) + 
+  geom_violin(size=1)+
+    geom_point(shape=16, position=position_jitter(0.2), size=0.1, aes(color=factor(discard)))+
+    scale_y_log10() +
+    theme_classic() +
+    labs(x="Sample",y="Number of detected genes", title="Detected features") +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1, size = 6),  plot.title = element_text(face = "bold"))+
+    theme(text=element_text(family="sans"))
+ggsave("./plots/scrnaseq/Genes_cutoff_adaptive_violin.pdf")
+
+# Mitochondrial counts
+plotColData(sce.small, x="Sample", y="subsets_Mito_percent", colour_by="discard") +
+  labs(x="Sample",y="Mitochondrial reads [%]", title="Percentage of mitochondrial reads") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1, size = 6),
+        plot.title = element_text(face = "bold")) +
+  scale_x_discrete(limits = good.stats.df$Sample) +
+  scale_y_continuous(limits=c(0,95.3))
+ggsave("./plots/scrnaseq/MT_cutoff_adaptive.pdf")
+
+ggcells(sce.small, aes(x = Sample, y = subsets_Mito_percent)) + 
+  geom_violin(size=1)+
+    geom_point(shape=16, position=position_jitter(0.2), size=0.1, aes(color=factor(discard)))+
+    scale_y_log10() +
+    theme_classic() +
+    labs(x="Sample",y="Mitochondrial reads [%]", title="Percentage of mitochondrial reads") +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1, size = 6),  plot.title = element_text(face = "bold"))+
+    theme(text=element_text(family="sans"))
+ggsave("./plots/scrnaseq/MT_cutoff_adaptive_violin.pdf")
+
+# Mitochondrial reads vs UMI counts
+good.samples.factor <- factor(colData(sce.all.subset)$Sample, levels = as.character(good.stats.df$Sample))
+
+plotColData(sce.all.subset, x="sum", y="subsets_Mito_percent", colour_by="discard") +
+  geom_point(size = 0.1) + 
+  scale_x_log10() +
+  facet_wrap(. ~ (good.samples.factor)) +
+  labs(x = "UMI counts", y = "Mitochondrial reads [%]")
+ggsave("./plots/scrnaseq/MT_vs_UMI_cutoff.pdf")
+
+colData(sce.all.subset) %>% data.frame() %>% 
+  ggplot(aes(x = sum, y = subsets_Mito_percent, color = discard)) + 
+    geom_point(size = 0.1) + facet_wrap(~(good.samples.factor)) + labs(x = "UMI counts", y = "Mitochondrial reads [%]") + 
+    scale_x_log10()
+ggsave("./plots/scrnaseq/MT_vs_UMI_cutoff_new.pdf")
+
+# Detected genes vs UMI counts
+plotColData(sce.all.subset, x="sum", y="detected", colour_by="discard") +
+  scale_x_log10() +
+  facet_wrap(. ~ (good.samples.factor)) +
+  labs(x = "UMI counts", y = "Number of detected genes")
+ggsave("./plots/scrnaseq/UMI_vs_detected_cutoff.pdf")
+
+```
+
+# Remove low quality cells
+```{r Remove low quality cells}
+
+#Remove low quality cells
+sce.filtered <- sce.all.subset[,!colData(sce.all.subset)$discard]
+
+#rm(list = c("sce.all.subset", "sce.cas", "sce.spr", "sce_subset_cas", "sce_subset_spr"))
+#rm(list= ls(all=TRUE)[!(ls(all=TRUE) %in% c("sce.filtered", "good.stats.df", "good_stats"))])
+```
+
+# Diagnostic plots after filtering
+```{r Plot after filtering, echo=FALSE}
+#subset randomly 100.000 cells out of the 450000
+sample.cells.filt <- sample(1:ncol(sce.filtered), 100000)
+sce.small.filt <- sce.filtered[,sample.cells.filt]
+
+# UMI counts after filtering
+plotColData(sce.small.filt, x="Sample", y="sum", colour_by="discard") +
+  scale_y_log10() +
+  labs(x="Sample",y="UMI counts", title="UMI counts after filtering") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1, size = 7),
+        plot.title = element_text(face = "bold")) +
+  scale_x_discrete(limits = good.stats.df$Sample) +
+  theme(legend.position = "none")
+ggsave("./plots/scrnaseq/UMI_cutoff_adaptive_after_filtering.pdf")
+
+ggcells(sce.small.filt, aes(x = Sample, y = sum)) + 
+geom_violin(size=1)+
+  geom_point(shape=16, position=position_jitter(0.2), size=0.1, aes(color=factor(discard)))+
+  scale_y_log10() +
+  theme_classic() +
+  labs(x="Sample",y="UMI counts", title="UMI counts") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1, size = 7),  plot.title = element_text(face = "bold"))+
+  theme(text=element_text(family="sans"))
+ggsave("./plots/scrnaseq/UMI_cutoff_adaptive_after_filtering_violin.pdf")
+
+# genes after filtering
+plotColData(sce.small.filt, x="Sample", y="detected", colour_by="discard") +
+  scale_y_log10() +
+  labs(x="Sample",y="Number of genes", title="Number of genes after filtering") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1, size = 7),
+        plot.title = element_text(face = "bold")) +
+  scale_x_discrete(limits = good.stats.df$Sample) +
+  theme(legend.position = "none")
+ggsave("./plots/scrnaseq/Genes_cutoff_adaptive_after_filtering.pdf")
+
+ggcells(sce.small.filt, aes(x = Sample, y = detected)) + 
+geom_violin(size=1)+
+  geom_point(shape=16, position=position_jitter(0.2), size=0.1, aes(color=factor(discard)))+
+  scale_y_log10() +
+  theme_classic() +
+  labs(x="Sample",y="Number of genes", title="Number of genes after filtering") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1, size = 7),  plot.title = element_text(face = "bold"))+
+  theme(text=element_text(family="sans"))
+ggsave("./plots/scrnaseq/Genes_cutoff_adaptive_after_filtering_violin.pdf")
+
+# # mito counts after filtering
+plotColData(sce.small.filt, x="Sample", y="subsets_Mito_percent", colour_by="discard") +
+  labs(x="Sample",y="Mitochondrial reads [%]", title="Percentage of mitochondrial reads") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1,size = 7),
+        plot.title = element_text(face = "bold")) +
+  scale_x_discrete(limits = good.stats.df$Sample) +
+    scale_y_continuous(limits=c(0,25))+
+  theme(legend.position = "none")
+ggsave("./plots/scrnaseq/Mito_cutoff_adaptive_after_filtering.pdf")
+
+ggcells(sce.small.filt, aes(x = Sample, y = subsets_Mito_percent)) + 
+geom_violin(size=1)+
+  geom_point(shape=16, position=position_jitter(0.2), size=0.1, aes(color=factor(discard)))+
+  scale_y_log10() +
+  theme_classic() +
+  labs(x="Sample",y="Mitochondrial reads [%]", title="Percentage of mitochondrial reads") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1, size = 7),  plot.title = element_text(face = "bold"))+
+  theme(text=element_text(family="sans"))
+ggsave("./plots/scrnaseq/Mito_cutoff_adaptive_after_filtering_violin.pdf")
+
+# Saving stats for cells after filtering
+filtered_stats <- melt(table(colData(sce.filtered)$Sample))
+filtered_stats <- filtered_stats[filtered_stats$value > 0,]
+
+filtered.df <- data.frame(row.names = filtered_stats$Var1,
+                          Sample = filtered_stats$Var1,
+                          No_cells_unfiltered = good_stats$value,
+                          No_cells_filtered = filtered_stats$value,
+                          No_cells_discarded = good_stats$value - filtered_stats$value,
+                          Tot_cells_discarded = sum(good_stats$value - filtered_stats$value))
+
+# Plot with cells after filtering 
+ggplot(filtered.df, aes(x = Sample, y = No_cells_filtered)) + 
+  geom_col() + theme_classic() +
+  labs(x="Sample",y="Number of cells", title="Number of cells after filtering") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1, size = 7),
+        plot.title = element_text(face = "bold")) +
+  scale_x_discrete(limits = good.stats.df$Sample)
+ggsave("./plots/scrnaseq/NumberCells_afterfiltering.pdf")
+
+# Plot with cells before and after filtering
+ggplot(data.frame(colData(sce.all.subset)), aes(Sample, fill = factor(colData(sce.all.subset)$discard, levels = c(TRUE, FALSE)))) +
+  geom_bar() + theme_classic() +
+  labs(x="Sample",y="Number of cells", title="Cells removed after quality filtering") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1, size = 7),
+        plot.title = element_text(face = "bold")) +
+  labs(fill = "Discard") +
+  # scale_x_discrete(limits = good.stats.df$Sample) + 
+  facet_grid(cols = vars(Library), scales = "free", space = "free")
+ggsave("./plots/scrnaseq/NumberCells_filtering_comparison.pdf")
+
+```
+
+# Diagnosing cell type loss
+```{r Diagnosing cell type loss}
+#looking for systematic differences in gene expression between the discarded and retained cells
+#If the discarded pool is enriched for a certain cell type, we should observe increased expression of the corresponding marker genes
+#sce.all.subset <- readRDS("/omics/groups/OE0538/internal/users/s674e/projects/Escapee/PreProcessing/sce.all.subset.rds")
+
+lost <- calculateAverage(counts(sce.all.subset)[,!discard.tot])
+kept <- calculateAverage(counts(sce.all.subset)[,discard.tot])
+
+logged <- cpm(cbind(lost, kept), log=TRUE, prior.count=2)
+logFC <- logged[,1] - logged[,2]
+abundance <- rowMeans(logged)
+
+plot(abundance, logFC, xlab="Average count", ylab="Log-FC (lost/kept)", pch=16) +
+points(abundance[is.mito], logFC[is.mito], col="dodgerblue", pch=16)
+ggsave("./plots/scrnaseq/cell_type_loss_diagnosis.pdf")
+
+sort(logFC)[1:10]
+
+```
+
+
+```{subset for the good samples only}
+
+# Plot with cells before and after filtering
+ggplot(data.frame(colData(sce.filtered)), aes(Sample, fill = factor(colData(sce.filtered)$discard, levels = c(TRUE, FALSE)))) +
+  geom_bar() + theme_classic() +
+  labs(x="Sample",y="Number of cells", title="Cells removed after quality filtering") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1, size = 7),
+        plot.title = element_text(face = "bold")) +
+  labs(fill = "Discard")
+
+# Save the filtered sce
+saveRDS(sce.filtered, "./processed_data/fourcore_filtered_sce.rds")
+
+```
+

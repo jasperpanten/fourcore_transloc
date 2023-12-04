@@ -1,0 +1,367 @@
+---
+title: "fourcore_subtype_annotation"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+```{r library, include=FALSE}
+
+setwd(paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+
+library(scran)
+library(scater)
+library(ggplot2)
+library(bsub)
+library(ComplexHeatmap)
+library(tidyverse)
+library(celldex)
+library(SingleR)
+
+# needed to run quasr
+bsub_opt$call_Rscript = function(version) {
+  GetoptLong::qq("module load libpng/1.6.37, module load R/@{version}; Rscript")
+}
+
+bsub_opt$user <- "panten"
+
+```
+
+This script generated all plots from the scRNA-Seq data analysis for the four core genotypes paper
+
+```{r asdas}
+
+# load data
+sce <- readRDS("./processed_data/fourcore_sce.final.rds")
+
+# add genotype information (do that before when rerunning)
+genotype_metadata <- 
+  read_csv("./metadata_rna_four_core.csv") %>% 
+  mutate(sample_identifier = paste0(seq_ids, "_", ILSE_NO))
+
+genotype_annotation <- genotype_metadata %>% pull(GENOTYPE, name = sample_identifier)
+
+sce$Genotype <- genotype_annotation[sce$Sample]
+
+# clusters out: -- likely doublets, outliers
+clusters_out <- c(14, 26, 27)
+
+sce <- sce[,!sce$label %in% clusters_out]
+
+# aggregate across samples
+sce.aggregate <- aggregateAcrossCells(sce, DataFrame(Sample = sce$Sample, Library = sce$Library))
+sce.aggregate.celltype <- aggregateAcrossCells(sce, DataFrame(Sample = sce$Sample, Library = sce$Library, sce$AnnotatedCellType))
+
+```
+
+We first validate that the samples are the expected genotypes
+
+```{r genotype_validation}
+
+# add chromosome annotation (should also be done before)
+library('AnnotationHub')
+ah <- AnnotationHub()
+query(ah, c("Mus musculus", "Ensembl", "v97"))
+ensdb <- ah[["AH73905"]]
+
+chromosome <- mapIds(ensdb,
+    keys = rownames(sce.aggregate),
+    keytype = "SYMBOL",
+    column = "SEQNAME")
+rowData(sce.aggregate)$chromosome <- chromosome
+
+sce.aggregate <- sce.aggregate[!is.na(rowData(sce.aggregate)$chromosome), ]
+
+sry_counts <- as.numeric(counts(sce.aggregate["Sry", ]))
+x_counts <- colSums(counts(sce.aggregate[rowData(sce.aggregate)$chromosome == "X", ]))
+xist_counts <- as.numeric(counts(sce.aggregate[rownames(sce.aggregate) == "Xist", ]))
+y_counts <- colSums(counts(sce.aggregate[rowData(sce.aggregate)$chromosome == "Y", ]))
+total_counts <- colSums(counts(sce.aggregate))
+
+sexing_results <- data.frame(
+  Sample = sce.aggregate$Sample, 
+  Genotype = sce.aggregate$Genotype, 
+  TotalCounts = total_counts, 
+  XCounts = x_counts,
+  YCounts = y_counts,
+  XistCounts = xist_counts,
+  SryCounts = sry_counts
+)
+
+sexing_results %>% 
+  pivot_longer(-c(Sample, Genotype, TotalCounts)) %>%
+  mutate(fraction = value / TotalCounts) %>%
+  dplyr::select(-c(TotalCounts, value)) %>%
+  pivot_wider(values_from = fraction, names_from = name) %>%
+  ggplot(aes(x = XistCounts, SryCounts, col = Genotype)) + geom_jitter(width = 0.00001, height = 0.000001, size = 10) + 
+    theme_bw() + xlab("Fraction Xist / Total") + 
+    ylab("Fraction Sry / Total") + ggrepel::geom_text_repel(aes(label = Sample), col = "black")
+
+### we correct the one sample that is swapped -- this should be corrected in the final submission
+swapped_sample1 <- "87884148_34406" # annotated as XYF, actually XXF
+swapped_sample2 <- "87882871_34406" # annotated as XXF, actually XYF
+
+sce.aggregate[,sce.aggregate$Sample == swapped_sample1]$Genotype <- "F1_FCG_XXF"
+sce.aggregate[,sce.aggregate$Sample == swapped_sample2]$Genotype <- "F1_FCG_XYF"
+
+### re-look at sex assignments
+sry_counts <- as.numeric(counts(sce.aggregate["Sry", ]))
+x_counts <- colSums(counts(sce.aggregate[rowData(sce.aggregate)$chromosome == "X", ]))
+xist_counts <- as.numeric(counts(sce.aggregate[rownames(sce.aggregate) == "Xist", ]))
+y_counts <- colSums(counts(sce.aggregate[rowData(sce.aggregate)$chromosome == "Y", ]))
+total_counts <- colSums(counts(sce.aggregate))
+
+sexing_results <- data.frame(
+  Sample = sce.aggregate$Sample, 
+  Genotype = sce.aggregate$Genotype, 
+  TotalCounts = total_counts, 
+  XCounts = x_counts,
+  YCounts = y_counts,
+  XistCounts = xist_counts,
+  SryCounts = sry_counts
+)
+
+sexing_results %>% 
+  pivot_longer(-c(Sample, Genotype, TotalCounts)) %>%
+  mutate(fraction = value / TotalCounts) %>%
+  dplyr::select(-c(TotalCounts, value)) %>%
+  pivot_wider(values_from = fraction, names_from = name) %>%
+  ggplot(aes(x = XistCounts, SryCounts, col = Genotype)) + geom_jitter(width = 0.00001, height = 0.000001, size = 10) + theme_bw() + 
+    xlab("Fraction Xist / Total") + 
+    ylab("Fraction Sry / Total")
+ggplot2::ggsave("./plots/scrnaseq/xist_sry_control.pdf")
+
+### look directly at y-linked counts: 
+sce.aggregate$Chromosomal <- ifelse(grepl("XX", sce.aggregate$Genotype), "female", "male")
+sce.aggregate$Gonadal <- ifelse(grepl("F$", sce.aggregate$Genotype), "female", "male")
+
+y_counts <- data.frame(
+  y_counts_xx = rowSums(counts(sce.aggregate[rowData(sce.aggregate)$chromosome == "Y", sce.aggregate$Chromosomal == "female"])), 
+  y_counts_xy = rowSums(counts(sce.aggregate[rowData(sce.aggregate)$chromosome == "Y", sce.aggregate$Chromosomal == "male"]))
+) %>%
+  mutate(total_y = y_counts_xx + y_counts_xy) %>%
+  dplyr::filter(total_y > 0) %>% rownames_to_column("Gene")
+
+```
+
+```{r deg_analysis}
+
+### degs: 
+
+library(DESeq2)
+
+theme_paper <- function(textsize = 20){
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(colour = "black"),
+        panel.border = element_rect(colour = "black", fill=NA, size=1), 
+        text = element_text(size = textsize, color = "black"), 
+        axis.text = element_text(size = textsize, color = "black"), 
+        axis.ticks = element_line(colour = 'black', size = 1), 
+        axis.ticks.length = unit(.25, "cm"))
+}
+
+make_ma_plot <- function(deseq_dataset){
+  deseq_dataset <- estimateSizeFactors(deseq_dataset)
+  deseq_dataset <- DESeq(deseq_dataset)
+  test <- results(deseq_dataset)
+  data.frame(head(test[order(test$padj), ], n = 20))
+  
+  rowData(sce.aggregate) %>% data.frame() %>% rownames_to_column("Gene") %>% pull(chromosome, name = Gene) -> gene_to_chromosome
+  
+  test %>% data.frame() %>% 
+    rownames_to_column("Gene") %>%
+    add_column("Chromosome" = gene_to_chromosome[.$Gene]) %>%
+    dplyr::filter(Chromosome == "X") %>%
+    dplyr::filter(baseMean > 10) %>%
+    mutate(padj = p.adjust(pvalue)) %>%
+    mutate(FC = ifelse(abs(log2FoldChange) > 2, sign(log2FoldChange) * 2, log2FoldChange)) -> test_df
+  
+  label_list <- c("Tmsb4x", "Tlr8", "Tlr7", "Prps2", "Frmpd4", "Msl3", "Arhgap6", "Amelx", "Hccs")
+  
+  test_df %>%
+    dplyr::filter(baseMean > 10) %>% 
+    {
+      ggplot(., aes(x = baseMean, y = 2 ** FC, fill = padj < .1 & FC > 0)) + 
+        scale_x_log10() + 
+        scale_y_continuous(trans = "log2") + 
+        geom_hline(yintercept = 2, linetype = 'dashed', color = "red") + 
+        geom_point(pch = 21, size = 3) + 
+        geom_hline(yintercept = 1, color = "black") + 
+                ggrepel::geom_text_repel(data = . %>% dplyr::filter(Gene %in% label_list | (padj < .1 & FC > 0)), 
+                                         aes(label = Gene), size = 7, nudge_x = .25, nudge_y = .25) + 
+        scale_fill_manual(values = c("grey", "orange")) + 
+        # theme_classic(base_size = 30) + 
+        theme_paper(textsize = 30) + 
+        xlab("Expression level") + ylab("XYT / XXT (fold change)") + 
+        theme(legend.position = "None")
+  }
+}
+
+make_ma_plot(DESeqDataSet(sce.aggregate[,sce.aggregate$Gonadal == "female"], design = ~ Library + Genotype)) + 
+  ylab("XYO / XXO (fold change)") + ggtitle("Gonadal females (spleen)")
+ggplot2::ggsave("./plots/scrnaseq/full_spleen_gonadal_female.pdf", width = 8, height = 8)
+
+make_ma_plot(DESeqDataSet(sce.aggregate[,sce.aggregate$Gonadal == "male"], design = ~ Library + Genotype)) + 
+  ylab("XYT / XXT (fold change)") + ggtitle("Gonadal males (spleen)")
+ggplot2::ggsave("./plots/scrnaseq/full_spleen_gonadal_male.pdf", width = 8, height = 8)
+
+### degs for individual cell types: 
+
+b.cells <- grepl("B-cell", sce.aggregate.celltype$AnnotatedCellType)
+t.cells <- grepl("T-cell|NK", sce.aggregate.celltype$AnnotatedCellType)
+myeloid <- !grepl("T-cell|NK|B-cell", sce.aggregate.celltype$AnnotatedCellType)
+
+# B-cells: 
+make_ma_plot(DESeqDataSet(sce.aggregate.celltype[,sce.aggregate.celltype$Gonadal == "female" & b.cells], design = ~ Library + Genotype))
+ggplot2::ggsave("./plots/scrnaseq/full_spleen_gonadal_female_bcells.pdf")
+
+make_ma_plot(DESeqDataSet(sce.aggregate.celltype[,sce.aggregate.celltype$Gonadal == "female" & t.cells], design = ~ Library + Genotype))
+ggplot2::ggsave("./plots/scrnaseq/full_spleen_gonadal_female_tcells.pdf")
+
+make_ma_plot(DESeqDataSet(sce.aggregate.celltype[,sce.aggregate.celltype$Gonadal == "female" & myeloid], design = ~ Library + Genotype))
+ggplot2::ggsave("./plots/scrnaseq/full_spleen_gonadal_female_myeloid.pdf")
+
+
+```
+
+```{r asdasdassssss}
+
+library(ggbio)
+p.ideo <- Ideogram(genome = "mm10", subchr = "chrX")
+p.ideo
+
+######### 
+
+library("EnsDb.Mmusculus.v79")
+gene_info <- genes(EnsDb.Mmusculus.v79)
+gene_info <- data.frame(gene_info[!duplicated(gene_info$symbol), ])
+
+gene_locations <- cbind(data.frame(gene_info[,c("seqnames", "start", "end", "gene_name")]), "Value" = 1)
+rownames(gene_locations) <- c()
+colnames(gene_locations) <- c("Chr", "Start", "End", "Symbol", "Value")
+
+gene_locations <- gene_locations[gene_locations$Symbol %in% c("Tlr7", "Prps2", "Msl3", "Tmsb4x", "Hccs", "Arhgap6"), ]
+gene_locations$End <- gene_locations$Start + 1
+
+p.ideo.2 <- autoplot(makeGRangesFromDataFrame(gene_locations), layout = "karyogram", alpha = 0.5, color = "orange") + theme_void()
+
+library(patchwork)
+
+pdf("./plots/scrnaseq/chromosome_ideogram.pdf")
+p.ideo@ggplot + p.ideo.2@ggplot + plot_layout(heights = c(1, 1))
+dev.off()
+
+```
+
+
+```{r deg_analysis}
+
+### degs: 
+
+library(DESeq2)
+
+make_ma_plot_2 <- function(deseq_dataset){
+  deseq_dataset <- estimateSizeFactors(deseq_dataset)
+  deseq_dataset <- DESeq(deseq_dataset)
+  test <- results(deseq_dataset)
+  data.frame(head(test[order(test$padj), ], n = 20))
+  
+  rowData(sce.aggregate) %>% data.frame() %>% rownames_to_column("Gene") %>% pull(chromosome, name = Gene) -> gene_to_chromosome
+  
+  test %>% data.frame() %>% 
+    rownames_to_column("Gene") %>%
+    add_column("Chromosome" = gene_to_chromosome[.$Gene]) %>%
+    dplyr::filter(Chromosome == "X") %>%
+    dplyr::filter(baseMean > 50) %>%
+    mutate(padj = p.adjust(pvalue)) %>%
+    mutate(FC = ifelse(abs(log2FoldChange) > 2, sign(log2FoldChange) * 2, log2FoldChange)) -> test_df
+  
+  test_df %>%
+    dplyr::filter(baseMean > 50) %>% 
+    {
+      ggplot(., aes(x = baseMean, y = 2 ** FC, fill = padj < .1 & FC > 0)) + 
+        scale_x_log10() + 
+        scale_y_continuous(trans = "log2") + 
+        # ggrepel::geom_text_repel(data = . %>% dplyr::filter(padj < .1), aes(label = Gene)) + 
+        geom_hline(yintercept = 2, linetype = 'dashed', color = "red") + 
+        geom_hline(yintercept = 1, color = "black") + 
+        geom_point(pch = 21, size = 3) + 
+        ggrepel::geom_text_repel(data = . %>% dplyr::filter(padj < .1 & FC > 0), 
+                                 aes(label = Gene), size = 7, nudge_x = .15, nudge_y = .15) + 
+        scale_fill_manual(values = c("grey", "orange")) + 
+        # theme_classic(base_size = 30) + 
+        theme_paper(textsize = 30) + 
+        xlab("Expression level") + ylab("XYT / XXT (fold change)") + 
+        theme(legend.position = "None")
+  }
+}
+
+make_ma_plot_2(DESeqDataSet(sce.aggregate[,sce.aggregate$Gonadal == "female"], design = ~ Library + Genotype)) + 
+  ylab("XYO / XXO (fold change)")
+ggplot2::ggsave("./plots/scrnaseq/full_spleen_gonadal_female_supplement.pdf", width = 8, height = 8)
+
+make_ma_plot_2(DESeqDataSet(sce.aggregate[,sce.aggregate$Gonadal == "male"], design = ~ Library + Genotype)) + 
+  ylab("XYT / XXT (fold change)")
+ggplot2::ggsave("./plots/scrnaseq/full_spleen_gonadal_male_supplement.pdf", width = 8, height = 8)
+
+### degs for individual cell types: 
+
+make_ma_plot_all_genes <- function(deseq_dataset){
+  deseq_dataset <- estimateSizeFactors(deseq_dataset)
+  deseq_dataset <- DESeq(deseq_dataset)
+  test <- results(deseq_dataset)
+  data.frame(head(test[order(test$padj), ], n = 20))
+  
+  rowData(sce.aggregate) %>% data.frame() %>% rownames_to_column("Gene") %>% pull(chromosome, name = Gene) -> gene_to_chromosome
+  
+  test %>% data.frame() %>% 
+    rownames_to_column("Gene") %>%
+    add_column("Chromosome" = gene_to_chromosome[.$Gene]) %>%
+    # dplyr::filter(Chromosome == "X") %>%
+    dplyr::filter(baseMean > 50) %>%
+    mutate(padj = p.adjust(pvalue)) %>%
+    mutate(labelling = ifelse(padj > .1, "grey", case_when(
+      Chromosome == "X" ~ "X", 
+      Chromosome == "Y" ~ "Y", 
+      .default = "Autosome"
+    ))) %>%
+    mutate(FC = ifelse(abs(log2FoldChange) > 2, sign(log2FoldChange) * 2, log2FoldChange)) -> test_df
+  
+  test_df %>%
+    dplyr::filter(baseMean > 50) %>% 
+    {
+      ggplot(., aes(x = baseMean, y = 2 ** FC, fill = labelling)) + 
+        scale_x_log10() + 
+        scale_y_continuous(trans = "log2") + 
+        # ggrepel::geom_text_repel(data = . %>% dplyr::filter(padj < .1), aes(label = Gene)) + 
+        geom_hline(yintercept = 2, linetype = 'dashed', color = "red") + 
+        geom_hline(yintercept = 1, color = "black") + 
+        geom_point(pch = 21, size = 3) + 
+        ggrepel::geom_text_repel(data = . %>% dplyr::filter(padj < .1), 
+                                 aes(label = Gene), size = 7, nudge_x = .15, nudge_y = .15) + 
+        scale_fill_manual(values = c("grey" =  "grey", "X" =  "red", Y = "green","Autosome" = "blue")) + 
+        # theme_classic(base_size = 30) + 
+        theme_paper(textsize = 30) + 
+        xlab("Expression level") + ylab("XYT / XXT (fold change)") + 
+        theme(legend.position = "None")
+  }
+}
+
+make_ma_plot_all_genes(DESeqDataSet(sce.aggregate[,sce.aggregate$Gonadal == "female"], design = ~ Library + Genotype)) + 
+  ylab("XYO / XXO (fold change)")
+ggplot2::ggsave("./plots/scrnaseq/full_spleen_gonadal_female_autosomes.pdf", width = 8, height = 8)
+
+make_ma_plot_all_genes(DESeqDataSet(sce.aggregate[,sce.aggregate$Gonadal == "male"], design = ~ Library + Genotype)) + 
+  ylab("XYT / XXT (fold change)")
+ggplot2::ggsave("./plots/scrnaseq/full_spleen_gonadal_male_autosomes.pdf", width = 8, height = 8)
+
+```
+

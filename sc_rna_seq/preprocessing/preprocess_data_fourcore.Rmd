@@ -1,0 +1,794 @@
+---
+title: "PreProcessing_fourcore"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+```{r library, include=FALSE}
+
+setwd(paste0(dirname(rstudioapi::getSourceEditorContext()$path), "/../"))
+
+# Load library - the below pipeline was run with R 4.1.0
+library(DropletUtils)
+library(scran)
+library(reshape2)
+library(scater)
+library(ggplot2)
+library(Rtsne)
+library(irlba)
+library(RColorBrewer)
+library(viridis)
+library(pheatmap)
+library(rtracklayer)
+library(gridExtra)
+library(writexl)
+library(PCAtools)
+library(BiocSingular)
+library(scuttle)
+library(batchelor)
+library(org.Mm.eg.db)
+library(limma)
+library(celldex)
+library(bluster)
+library(edgeR)
+library(bsub)
+library(scDblFinder)
+library(BiocParallel)
+library(celldex)
+library(SingleR)
+library(magrittr)
+library(dplyr)
+
+```
+
+# Normalisation by deconvolution using quick cluster (that gives 46c) and log transf. sce
+#OBSERVATIONS: We see that the deconvolution size factors exhibit cell type-specific deviations from the library size factors. This is consistent with the presence of composition biases that are introduced by strong differential expression between cell types
+```{r Normalisation AND log transformation, echo=FALSE}
+
+sce.filtered <- readRDS("./processed_data/fourcore_filtered_sce.rds")
+
+# Library size factors calculation 
+# lib.sf <- librarySizeFactors(sce.filtered)
+# summary(lib.sf)
+# hist(log10(lib.sf), xlab="Log10[Size factor]", col='grey80')
+
+# Normalization, Scaling and log-transforming
+bsub_chunk(name = 'cluster2', packages = c('scran','scater', 'bluster', 'parallel'), memory = 100, variables = "sce.filtered",
+           core = 5, hour = 40,{
+
+             cluObj <- makeCluster(40)
+
+             set.seed(12345)
+             clusters <- quickCluster(sce.filtered, min.size = 100)
+             normCluster <- table(clusters)
+
+             deconv.sf <- calculateSumFactors(sce.filtered, cluster=clusters)
+             sce.deconv.sf <- computeSumFactors(sce.filtered, cluster=clusters)
+             sce.norm <- logNormCounts(sce.deconv.sf)
+
+             saveRDS(sce.norm, "./processed_data/fourcore_sce_norm.rds")
+             }
+          )
+
+sce.norm <- readRDS("./processed_data/fourcore_sce_norm.rds")
+
+```
+
+
+# HVG selection - top 10% of genes, 1932 genes
+#OBSERVATIONS: among the first HVG there are Hbb genes
+```{r HVG selection, echo=FALSE}
+
+# Feature selection
+#to compute the variance of the log-normalized expression values for each gene across all cells
+model.gene.var <- modelGeneVar(sce.norm)
+
+# Visualizing the fit:
+var.mean.fit <- metadata(model.gene.var)
+plot(var.mean.fit$mean, var.mean.fit$var, xlab="Mean of log-expression",
+     ylab="Variance of log-expression")
+curve(var.mean.fit$trend(x), col="dodgerblue", add=TRUE, lwd=2)
+
+# Ordering by most interesting genes for inspection
+hvgs.table <- model.gene.var[order(model.gene.var$bio, decreasing=TRUE),]
+
+# Get the top 10% of genes, it is 1932 genes
+top.hvgs <- getTopHVGs(model.gene.var, prop = 0.1)
+length(top.hvgs)
+
+saveRDS(top.hvgs, "./processed_data/fourcore_top_hvgs.rds")
+```
+
+
+# Dimensionality reduction - PCA
+#OBSERVATIONS: the elbow analysis shows that 7 PCs are enough to explain 25% of variance and 50PCs 35% of variance. 
+```{r PCA, echo=FALSE}
+
+bsub_chunk(name = 'scereddim', packages = c('scran','scater', 'PCAtools', 'parallel'), 
+           memory = 100, variables = c("sce.norm", "top.hvgs"),
+           core = 5, hour = 40,{
+
+             cluObj <- makeCluster(40)
+
+             set.seed(12345)
+             sce.red.dim <- fixedPCA(sce.norm, subset.row=top.hvgs)
+             saveRDS(sce.red.dim, "./processed_data/fourcore_sce_red_dim.rds")
+             }
+          )
+
+sce.red.dim <- readRDS("./processed_data/fourcore_sce_red_dim.rds")
+dim(reducedDim(sce.red.dim, "PCA"))
+
+# Choice of PCs to keep
+percent.var <- attr(reducedDim(sce.red.dim), "percentVar")
+plot(percent.var, xlab="PC", ylab="Variance explained (%)")
+
+# Choosing the suitable number of PCs - 7 PCs are enough to explain 25% variability
+chosen.elbow <- findElbowPoint(percent.var)
+chosen.elbow 
+
+# Creating a new entry with only the first PCs until the calculated elbow
+reducedDim(sce.red.dim, "PCA.elbow") <- reducedDim(sce.red.dim)[,1:chosen.elbow]
+reducedDimNames(sce.red.dim)
+
+plot(percent.var, xlab="PC", ylab="Variance explained (%)") +
+abline(v=chosen.elbow, col="red")
+
+plot(cumsum(percent.var), xlab="PC", ylab="Cumulative variance explained (%)") + 
+abline(v=chosen.elbow, col="red")
+
+# Plot the top 2 PCs
+PCA.plot <- plotReducedDim(sce.red.dim, dimred="PCA", colour_by="Sample") +
+  labs(color = "Sample")
+PCA.plot
+
+# Plot PCs for each sample
+samples.factor.2 <- factor(colData(sce.red.dim)$Sample, levels = unique(colData(sce.red.dim)$Sample))
+PCA.plot.samples <- plotReducedDim(sce.red.dim, dimred="PCA", colour_by="Sample") +
+  scale_color_discrete(limits = unique(colData(sce.red.dim)$Sample)) +
+  facet_wrap(. ~ (samples.factor.2)) +
+  labs(color = "Sample")
+PCA.plot.samples
+
+# Plot other PCs
+plotReducedDim(sce.red.dim, dimred="PCA", ncomponents=4, colour_by="Sample") +
+  scale_color_discrete(limits = unique(colData(sce.red.dim)$Sample))
+
+```
+
+# Dimensionality reduction - t-stochastic neighbor embedding with 50PCs
+#OBSERVATIONS: most of the variability among the samples is due to the experiment datE
+```{r tsne, echo=FALSE}
+# Run the TSNE analysis and stores the t-SNE coordinates in the reducedDims
+
+bsub_chunk(name = 'scetsne', packages = c('scran','scater', 'PCAtools', 'parallel'), memory = 100, variables = "sce.red.dim",
+           core = 5, hour = 40,{
+
+             cluObj <- makeCluster(40)
+
+             set.seed(12345)
+             sce.tsne <- runTSNE(sce.red.dim, dimred="PCA")  # we will just run with the top PCs- which are I guess 50
+             saveRDS(sce.tsne, "./processed_data/fourcore_sce_tsne.rds")
+             }
+          )
+
+sce.tsne <- readRDS("./processed_data/fourcore_sce_tsne.rds")
+
+# Create a df with the TSNE info related to samples and exp. date
+tSNE <- data.frame(Sample = colData(sce.tsne)$Sample,
+                   Experiment_Date = factor(colData(sce.tsne)$Library),
+                   tSNE1=reducedDims(sce.tsne)$TSNE[,1],
+                   tSNE2=reducedDims(sce.tsne)$TSNE[,2])
+
+# TSNE plot
+out <- ggplot(tSNE, aes(tSNE1, tSNE2, color = Experiment_Date)) +
+  geom_point(alpha = 0.6, size=0.01) + theme_classic()
+  # scale_color_discrete(limits = filtered.df$Sample)
+out
+
+# TSNE plot for library size
+ggplot(data.frame(tsne1 = reducedDims(sce.tsne)$TSNE[,1],
+                  tsne2 = reducedDims(sce.tsne)$TSNE[,2],
+                  gene = log10(colData(sce.tsne)$total) + 2)) +
+  geom_point(aes(tsne1, tsne2, colour = gene)) + scale_colour_viridis()+
+  labs(title="Library size")
+
+# TSNE plot for number of genes expressed
+ggplot(data.frame(tsne1 = reducedDims(sce.tsne)$TSNE[,1],
+                  tsne2 = reducedDims(sce.tsne)$TSNE[,2],
+                  gene = log10(colData(sce.tsne)$detected) + 2)) +
+  geom_point(aes(tsne1, tsne2, colour = gene)) + scale_colour_viridis()+
+  labs(title="Number of expressed genes")
+
+# TSNE plot for Xist
+gene = "Xist"
+ggplot(data.frame(tsne1 = reducedDims(sce.tsne)$TSNE[,1],
+                  tsne2 = reducedDims(sce.tsne)$TSNE[,2],
+                  gene = logcounts(sce.tsne)[gene,] + 1)) +
+  geom_point(aes(tsne1, tsne2, colour = gene)) + scale_colour_viridis() + 
+  theme_classic() + 
+  facet_wrap(. ~ (sce.tsne$Sample)) +
+  ggtitle("Xist")
+
+# TSNE plot for Tsix
+gene = "Tsix"
+ggplot(data.frame(tsne1 = reducedDims(sce.tsne)$TSNE[,1],
+                  tsne2 = reducedDims(sce.tsne)$TSNE[,2],
+                  gene = logcounts(sce.tsne)[gene,] + 3)) +
+  geom_point(aes(tsne1, tsne2, colour = gene)) + scale_colour_viridis() + 
+  theme_classic() + 
+  facet_wrap(. ~ (samples.factor.2)) +
+  ggtitle("Tsix")
+
+# TSNE plot for Uty
+gene = "Uty"
+ggplot(data.frame(tsne1 = reducedDims(sce.tsne)$TSNE[,1],
+                  tsne2 = reducedDims(sce.tsne)$TSNE[,2],
+                  gene = logcounts(sce.tsne)[gene,] + 3)) +
+  geom_point(aes(tsne1, tsne2, colour = gene)) + scale_colour_viridis() + 
+  theme_classic() + 
+  facet_wrap(. ~ (samples.factor.2)) +
+  ggtitle("Uty")
+
+```
+
+# Batch correction by MNN for experiment date
+```{r Batch correction by MNN, echo=FALSE}
+
+# Split datasets into batches (exp. date) and MNN correct them
+
+bsub_chunk(name = 'batchCor', packages = c('scran','scater', 'batchelor', 'parallel'), 
+           memory = 200, variables = c("sce.norm", "top.hvgs"),
+            core = 5, hour = 40,{
+
+              cluObj <- makeCluster(40)
+              
+              sce.norm <- readRDS("./processed_data/fourcore_sce_norm.rds")
+              top.hvgs <- readRDS("./processed_data/fourcore_top_hvgs.rds")
+
+              mnn.correction <- fastMNN(sce.norm, batch = colData(sce.norm)$Sample, subset.row=top.hvgs, correct.all = TRUE)
+              saveRDS(mnn.correction, "./processed_data/fourcore_mnn_correction.rds")
+              }
+)
+
+# Sce corrected by exp. date
+mnn.correction <- readRDS("./processed_data/fourcore_mnn_correction.rds")
+sce.corr <- sce.norm
+reducedDims(sce.corr)$corrected <- reducedDims(mnn.correction)$corrected
+
+```
+
+
+# Dimensionality reduction - tSNE after batch correction
+```{r tSNE after MNN, echo=FALSE}
+
+# Run the tSNE analysis and stores the tSNE coordinates in the reducedDims - corrected by exp date
+
+bsub_chunk(name = 'scetsnecorr', packages = c('scran','scater', 'PCAtools', 'parallel'), memory = 100, variables = "sce.corr",
+            core = 4, hour = 40,{
+
+              cluObj <- makeCluster(40)
+
+              set.seed(12345)
+              sce.corr.tsne <- runTSNE(sce.corr, dimred="corrected")
+              saveRDS(sce.corr.tsne, "./processed_data/fourcore_sce_corr_tsne.rds")
+              }
+           )
+
+# Tsne corrected by exp date
+sce.corr.tsne <- readRDS("./processed_data/fourcore_sce_corr_tsne.rds")
+#reducedDimNames(sce.corr.tsne)
+#reducedDims(sce.corr.tsne)$TSNE
+
+
+# Create a df with the TSNE info related to samples and exp. date - exp date corrected
+tSNE.corr <- data.frame(Sample = colData(sce.corr.tsne)$Sample,
+                        Experiment_Date = colData(sce.corr.tsne)$Library,
+                        tSNE1=reducedDims(sce.corr.tsne)$TSNE[,1],
+                        tSNE2=reducedDims(sce.corr.tsne)$TSNE[,2])
+
+# TSNE plot - exp date corrected
+out <- ggplot(tSNE.corr, aes(tSNE1, tSNE2, color = Sample)) +
+  geom_point(alpha = 0.6, size = 0.01) + theme_classic() +
+  # scale_color_discrete(limits = filtered.df$Sample)+
+  ggtitle("no perplexity - exp date corrected")
+out
+
+# TSNE plot separated by sample - exp date corrected
+samples.factor.2 <- factor(colData(sce.corr.tsne)$Sample)
+ggplot(tSNE.corr, aes(tSNE1, tSNE2, color = Sample)) +
+  geom_point(alpha = 0.6, size = 0.01) + theme_classic() +
+  # scale_color_discrete(limits = filtered.df$Sample) +
+  ggtitle("no perplexity - exp date corrected") +
+  facet_wrap(. ~ (samples.factor.2))
+
+# TSNE plot for Xist
+gene = "Xist"
+ggplot(data.frame(tsne1 = reducedDims(sce.corr.tsne)$TSNE[,1],
+                  tsne2 = reducedDims(sce.corr.tsne)$TSNE[,2],
+                  gene = logcounts(sce.corr.tsne)[gene,] + 1)) +
+  geom_point(aes(tsne1, tsne2, colour = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() +
+  theme_classic() + 
+  facet_wrap(. ~ (samples.factor.2)) +
+  ggtitle("Xist")
+
+# TSNE plot for Tsix
+gene = "Tsix"
+ggplot(data.frame(tsne1 = reducedDims(sce.corr.tsne)$TSNE[,1],
+                  tsne2 = reducedDims(sce.corr.tsne)$TSNE[,2],
+                  gene = logcounts(sce.corr.tsne)[gene,] + 1)) +
+  geom_point(aes(tsne1, tsne2, colour = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  theme_classic() + 
+  facet_wrap(. ~ (samples.factor.2)) +
+  ggtitle("Tsix")
+
+# TSNE plot for library size
+ggplot(data.frame(tsne1 = reducedDims(sce.corr.tsne)$TSNE[,1],
+                  tsne2 = reducedDims(sce.corr.tsne)$TSNE[,2],
+                  gene = log10(colData(sce.corr.tsne)$total)+ 1)) +
+  geom_point(aes(tsne1, tsne2, colour = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  theme_classic() + 
+  facet_wrap(. ~ (samples.factor.2)) +
+  ggtitle("Library Size")
+
+# TSNE plot for mito genes
+ggplot(data.frame(tsne1 = reducedDims(sce.corr.tsne)$TSNE[,1],
+                  tsne2 = reducedDims(sce.corr.tsne)$TSNE[,2],
+                  gene = log10(colData(sce.corr.tsne)$subsets_Mito_percent)+ 1)) +
+  geom_point(aes(tsne1, tsne2, colour = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  theme_classic() + 
+  facet_wrap(. ~ (samples.factor.2)) +
+  ggtitle("subsets_Mito_percent")
+
+```
+
+# Clustering
+# Trying k means 3, louvain with exp. date corrected Tsne
+#OBSERVATIONS: 26 clusters were find. Purity, silhuette and pairwise analysis indicated a "good" cells separation.
+```{r clustering k=3 louvain, echo=FALSE}
+
+# Trying k means 3 and louvain with exp. date corrected Tsne
+bsub_chunk(name = 'cluster_k3louv', packages = c('scran','scater', 'bluster', 'parallel'), 
+           memory = 100, variables = "sce.corr.tsne",
+           core = 4, hour = 36,{
+
+              cluObj <- makeCluster(40)
+              sce.corr.tsne <- readRDS("./processed_data/fourcore_sce_corr_tsne.rds")
+
+              g3l <- buildSNNGraph(sce.corr.tsne, use.dimred="corrected", k=3)
+              cell.clusters3lo <- igraph::cluster_louvain(g3l)$membership
+              
+              saveRDS(g3l, "./processed_data/fourcore_g3l.rds")
+              saveRDS(cell.clusters3lo,"./processed_data/fourcore_cell.clusters3lo.rds")
+              
+              }
+           )
+
+g3l <- readRDS("./processed_data/fourcore_g3l.rds")
+cell.clusters3lo <- readRDS("./processed_data/fourcore_cell.clusters3lo.rds")
+
+table(cell.clusters3lo)
+
+sce.clustered3lo <- sce.corr.tsne
+colLabels(sce.clustered3lo) <- cell.clusters3lo
+
+saveRDS(sce.clustered3lo, "./processed_data/fourcore_sce.clustered3lo.rds")
+sce.clustered3lo <- readRDS("./processed_data/fourcore_sce.clustered3lo.rds")
+
+# Purity & silhuette check
+bsub_chunk(name = 'cluster_k3louv_Pur_Sil', packages = c('scran','scater', 'bluster', 'parallel'), memory = 100, variables = "sce.clustered3lo",
+            core = 4, hour = 36,{
+
+              cluObj <- makeCluster(40)
+
+              pure.3lo <- neighborPurity(reducedDim(sce.clustered3lo, "corrected"), colLabels(sce.clustered3lo))
+              saveRDS(pure.3lo, "./processed_data/fourcore_pure.3lo.rds")
+
+              sil.approx3lo <- approxSilhouette(reducedDim(sce.clustered3lo, "corrected"), colLabels(sce.clustered3lo))
+              saveRDS(sil.approx3lo,"./processed_data/fourcore_sil.approx3lo.rds")
+              }
+           )
+
+# Purity check
+pure.3lo <- readRDS("./processed_data/fourcore_pure.3lo.rds")
+pure.3lo
+
+pure.data <- as.data.frame(pure.3lo)
+pure.data$maximum <- factor(pure.data$maximum)
+pure.data$cluster <- colLabels(sce.clustered3lo)
+
+pur_k3lo <- ggplot(pure.data, aes(x=cluster, y=purity, colour=maximum)) +
+  ggbeeswarm::geom_quasirandom(method="smiley")+
+  ggtitle("Purity k3 louvain")
+ggsave("pur_k3lo.pdf", plot = pur_k3lo, scale = 3.5)
+pur_k3lo
+
+table(Cluster=colLabels(sce.clustered3lo), pure.data$maximum)
+
+# Silhuette check
+sil.approx3lo <- readRDS("./processed_data/fourcore_sil.approx3lo.rds")
+sil.approx3lo
+
+sil.data <- as.data.frame(sil.approx3lo)
+sil.data$closest <- factor(ifelse(sil.data$width > 0, colLabels(sce.clustered3lo), sil.data$other))
+sil.data$cluster <- colLabels(sce.clustered3lo)
+
+sil_k3lo <- ggplot(sil.data, aes(x=cluster, y=width, colour=closest)) +
+    ggbeeswarm::geom_quasirandom(method="smiley")+
+  ggtitle("Sil k3 louvain")
+ggsave("sil_k3lo.pdf", plot = sil_k3lo, scale = 3.5)
+sil_k3lo
+
+# Plot the cluster
+clust_k3lo <- plotTSNE(sce.clustered3lo, colour_by="label", text_by="label")
+ggsave("clust_k3lo.pdf", plot = clust_k3lo, scale = 3.5)
+clust_k3lo
+
+clust_samp_k3lo <- ggplot(data.frame(Sample = colData(sce.clustered3lo)$Sample,
+                  tSNE1=reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2=reducedDims(sce.clustered3lo)$TSNE[,2],
+                  Cluster = as.factor(colData(sce.clustered3lo)$label)), 
+       aes(tSNE1, tSNE2, color = Cluster)) +
+  geom_point(alpha = 0.6, size = 0.01) + theme_classic() +
+  facet_wrap(. ~ (samples.factor.2))
+ggsave("clust_samp_k3lo.pdf", plot = clust_samp_k3lo, scale = 3.5)
+clust_samp_k3lo
+
+# Pairwise modularity
+ratio <- pairwiseModularity(g3l, cell.clusters3lo, as.ratio=TRUE)
+dim(ratio)
+pheatmap(log2(ratio+1), cluster_rows=FALSE, cluster_cols=FALSE, main="k3 Louvain",
+    color=colorRampPalette(c("white", "blue"))(100))
+
+# Cluster proportion for each samples
+colData(sce.clustered3lo) %>% data.frame() %>%
+  ggplot(aes(x = Sample, fill = factor(label))) + 
+    geom_bar(position = "fill") + theme_classic() + 
+    coord_flip()
+
+```
+
+
+# Manual search of marker genes
+```{r Manual search of marker genes, echo=FALSE}
+# Plot gene expression
+gene = "Cd79a" #B cells
+Cd79a <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Cd79a-B cells") + labs(color = "log(counts)") +
+  theme_classic()
+
+data.frame(
+  Sample = sce.clustered3lo$Age, 
+  Expression = as.numeric(logcounts(sce.clustered3lo["Cd79a", ]))
+) %>%
+  ggplot(aes(x = Sample, y = Expression)) + 
+  geom_boxplot(width = 0.3, outlier.colour = NA) + scale_colour_viridis() +
+  ggtitle("Cd79a-B cells") +
+  theme_classic()
+
+gene = "Cd22" #B cells
+Cd22 <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Cd22-B cells") + labs(color = "log(counts)") +
+  theme_classic()
+
+gene = "Cd27" #T cells
+Cd27 <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Cd27-T cells") + labs(color = "log(counts)") +
+  theme_classic()
+
+gene = "Cd3e" #T cells
+Cd3e <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Cd3e-T cells") + labs(color = "log(counts)") +
+  theme_classic()
+
+gene = "Try5" #Memory B cells
+Try5 <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Try5-Memory B") + labs(color = "log(counts)") +
+  theme_classic()
+
+gene = "Try4" #Memory B cells
+Try4 <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Try4-Memory B") + labs(color = "log(counts)") +
+  theme_classic()
+
+gene = "Gzma" #NK cells
+Gzma <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Gzma-NK cells") + labs(color = "log(counts)") +
+  theme_classic()
+
+gene = "Ccl5" #NK cells
+Ccl5 <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Ccl5-NK cells") + labs(color = "log(counts)") +
+  theme_classic()
+
+gene = "Cd68" #APC cells
+Cd68 <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Cd68-APC cells") + labs(color = "log(counts)") +
+  theme_classic()
+
+gene = "Ccl6" #APC cells
+Ccl6 <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Ccl6-APC cells") + labs(color = "log(counts)") +
+  theme_classic()
+
+gene = "Cxcr2" #neutrophils cells
+Cxcr2 <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Cxcr2-Neutrophils") + labs(color = "log(counts)") +
+  theme_classic()
+
+gene = "Il1b" #neutrophils cells
+Il1b <- ggplot(data.frame(tSNE1 = reducedDims(sce.clustered3lo)$TSNE[,1],
+                  tSNE2 = reducedDims(sce.clustered3lo)$TSNE[,2],
+                  gene = logcounts(sce.clustered3lo)[gene,])) +
+  geom_point(aes(tSNE1, tSNE2, color = gene), alpha = 0.6, size = 0.01) + scale_colour_viridis() + 
+  ggtitle("Il1b-Neutrophils") + labs(color = "log(counts)") +
+  theme_classic()
+
+
+gridExtra::grid.arrange(Cd3e, Cd27, Cd79a, Cd22)
+gridExtra::grid.arrange(Try4,Try5,Gzma,Ccl5)
+gridExtra::grid.arrange(Cd68, Ccl6, Cxcr2, Il1b)
+
+# B cells "Cd79a", "Cd79b", "Cd22", "Cd19", "Cd74", "Ebf1", "Iglc3"
+
+# T cells "Cd27", "Cd3e", "Ms4a4b", "Trbc2", "Lef1", "Cd3g"
+# T cell subsets "Cd4", "Cd8a"
+
+# NK cells "Gzma", "Ccl5", "Fcer1g", "Nkg7", "Klrk1"
+
+# Granulocytes "Cxcr2", "S100a9", "S100a8"
+
+# Macrophages "Cd14", "Cd68", "Ccl6", "C1qb", "C1qa"
+
+```
+
+
+# Doublets identfication with scDblFinder - simulate doublets between different clusters
+#the no. of doublets is very high with this type of simulation, singlet(144400) doublet(84878)
+```{r Doublets identfication, echo=FALSE}
+
+bsub_chunk(name = 'doubletsSamp', packages = c('scran','scater', 'scDblFinder', 'parallel'), memory = 100, variables = "sce.clustered3lo",
+             core = 4, hour = 36,{
+
+               cluObj <- makeCluster(40)
+
+               sceS <- scDblFinder(sce.clustered3lo, clusters = colData(sce.clustered3lo)$label)
+               saveRDS(sceS, "./processed_data/sceS.rds")
+               }
+            )
+
+#1. sceS <- scDblFinder(sce.clustered3lo, clusters = colData(sce.clustered3lo)$label, samples = colData(sce.clustered3lo)$Sample ###does not work, becasue probelms with B6Xcast_sp05_yo_f
+
+# sceS <- readRDS("/omics/groups/OE0538/internal/users/s674e/projects/Escapee/PreProcessing/sceS.rds")
+# plotTSNE(sceS, colour_by="scDblFinder.score", text_by="label")
+# table(sceS$scDblFinder.class)
+# table(sce.clustered3lo$scDblFinder.class, sce.clustered3lo$label)
+# 
+# data.frame(
+#   Tsne1 = reducedDims(sceS)$TSNE[,1], 
+#   Tsne2 = reducedDims(sceS)$TSNE[,2], 
+#   is_doublet = sceS$scDblFinder.class
+# ) %>% 
+#   ggplot(aes(x = Tsne1, y = Tsne2)) + geom_point(size = 0.1, alpha = 0.2) + scale_colour_viridis() + facet_wrap(~is_doublet)
+# 
+# plotColData(sceS, x="label", y="scDblFinder.score", colour_by="scDblFinder.class")
+# 
+# # add the score and calls to the sce 
+# colData(sce.clustered3lo)$scDblFinder.score <- sceS$scDblFinder.score
+# colData(sce.clustered3lo)$scDblFinder.class <- sceS$scDblFinder.class
+
+```
+
+
+# CellCycles identfication with cyclone 
+```{r CellCycles identfication, echo=FALSE}
+
+mm.pairs <- readRDS(system.file("exdata", "mouse_cycle_markers.rds", package="scran"))
+
+bsub_chunk(name = 'cellCycl', packages = c('scran','scater', 'parallel'), 
+           memory = 100, variables = c("sce.clustered3lo", "mm.pairs"),
+             core = 4, hour = 6,{
+
+               cluObj <- makeCluster(40)
+               set.seed(12345)
+               assignments <- cyclone(sce.clustered3lo, mm.pairs, gene.names=rowData(sce.clustered3lo)$ID)
+               saveRDS(assignments, "./processed_data/fourcore_assignments.rds")
+               }
+            )
+
+assignments <- readRDS("./processed_data/fourcore_assignments.rds")
+
+table(assignments$phases)
+table(assignments$phases, colLabels(sce.clustered3lo))
+
+colData(sce.clustered3lo)$phases <- assignments$phases
+
+plotTSNE(sce.clustered3lo, colour_by = "phases", text_by="label")
+
+data.frame(
+  Tsne1 = reducedDims(sce.clustered3lo)$TSNE[,1], 
+  Tsne2 = reducedDims(sce.clustered3lo)$TSNE[,2], 
+  phases = sce.clustered3lo$phases
+) %>% 
+  ggplot(aes(x = Tsne1, y = Tsne2)) + geom_point(size = 0.1, alpha = 0.2) + scale_colour_viridis() + facet_wrap(~phases)
+
+
+```
+
+# Marker genes detection - Unbiased approach to assign cell types to clusters
+```{r Marker genes detection, echo=FALSE}
+# Identifying upregulated genes for each clusters and samples
+#we separate by sample to avoid that the variation between samples (e.g. old vs young AND female vs male) interferes
+#with marker gene detection. We want the marker genes to annotate the different clusters
+#according to the cell type they belong to, not to make distinctions between old and young, that will come later.
+
+bsub_chunk(name = 'marker', packages = c('scran','scater'), memory = 100, variables = "sce.clustered3lo",
+             core = 4, hour = 36,{
+
+               cluObj <- makeCluster(40)
+
+               marker.info <- scoreMarkers(sce.clustered3lo, colLabels(sce.clustered3lo), block=sce.clustered3lo$Sample)
+               saveRDS(marker.info,"./processed_data/marker.info.rds")
+               }
+            )
+
+# marker.info <- readRDS("/omics/groups/OE0538/internal/users/s674e/projects/Escapee/PreProcessing/marker.info.rds")
+# marker.info
+# 
+# for (i in 1:26){
+# 
+# colnames(marker.info[[i]]) # statistics for cluster 1.
+# chosen <- marker.info[[i]]
+# 
+# ordered <- chosen[order(chosen$mean.AUC, decreasing=TRUE),]
+# head(ordered[,1:15])
+# top <- head(ordered[,1:15], n= 30)
+# marker.info[[i]][order(marker.info[[i]]$mean.AUC, decreasing=TRUE),][1:10,]
+# rownames(marker.info[[i]][order(marker.info[[i]]$mean.AUC, decreasing=TRUE),][1:10,])
+# 
+# plotExpression(sce.clustered3lo, features=head(rownames(ordered)), 
+#     x="label", colour_by="label")
+# 
+# plotGroupedHeatmap(sce.clustered3lo, features=rownames(top), group="label", center=TRUE, zlim=c(-3, 3))
+# }
+
+
+```
+
+# Cell type annotation using ImmGen dataset
+```{r Cell type annotation with ImmGen, echo=FALSE}
+
+ref.sce <- celldex::ImmGenData()
+
+# Run ImmGen for the entire dataset
+bsub_chunk(name = 'immGen', packages = c('scran','scater','celldex', 'SingleR', 'parallel'), memory = 100, variables = c("sce.clustered3lo", "ref.sce"),
+             core = 4, hour = 36,{
+
+               cluObj <- makeCluster(40)
+
+               pred <- SingleR(test=sce.clustered3lo, ref=ref.sce, labels=ref.sce$label.main)
+               saveRDS(pred, "./processed_data/fourcore_pred.rds")
+               }
+            )
+
+# Run ImmGen for the entire dataset
+bsub_chunk(name = 'immGenPredFine', packages = c('scran','scater','celldex', 'SingleR', 'parallel'), memory = 100, variables = c("sce.clustered3lo", "ref.sce"),
+             core = 4, hour = 36,{
+
+               cluObj <- makeCluster(40)
+
+               pred.fine <- SingleR(test=sce.clustered3lo, ref=ref.sce, labels=ref.sce$label.fine)
+               saveRDS(pred.fine, "./processed_data/fourcore_pred.fine.rds")
+               }
+            )
+
+pred <- readRDS("./processed_data/fourcore_pred.rds")
+pred.fine <- readRDS ("./processed_data/fourcore_pred.fine.rds")
+
+# Subset the sce for hvg before to run ImmGen
+sce.clustered3lo.hvg <- sce.clustered3lo[top.hvgs,]
+
+# Run ImmGen on the entire dataset
+table(pred$labels)
+plotScoreHeatmap(pred)
+tab <- table(Assigned=pred$pruned.labels, Cluster=colLabels(sce.clustered3lo))
+tab[grepl("B cell", rownames(tab)), ]
+pheatmap(log10(tab+1), color=colorRampPalette(c("white", "blue"))(101))
+
+#Add the cell type annotation to the sce
+sce.cell.types <- sce.clustered3lo
+colData(sce.cell.types)$celltype.main <- pred$pruned.labels
+
+# Plot cell types in tSNE plot
+ggplot(data.frame(Sample = colData(sce.cell.types)$Sample,
+                  tSNE1=reducedDims(sce.cell.types)$TSNE[,1],
+                  tSNE2=reducedDims(sce.cell.types)$TSNE[,2],
+                  Cell_type = as.factor(colData(sce.cell.types)$celltype.main)), 
+       aes(tSNE1, tSNE2, color = Cell_type)) +
+  geom_point(alpha = 0.6, size=0.01) + theme_classic()
+
+plotTSNE(sce.cell.types, colour_by="celltype.main", text_by="celltype.main", text_size=4)
+
+# Cell types proportion for each samples
+colData(sce.cell.types) %>% data.frame() %>%
+  ggplot(aes(x = Sample, fill = factor(celltype.fine))) + 
+    geom_bar(position = "fill") + theme_classic() +
+    coord_flip()
+
+# Cell types proportion for each samples
+colData(sce.cell.types) %>% data.frame() %>%
+  ggplot(aes(x = Sample, fill = factor(celltype.main))) + 
+    geom_bar(position = "fill") + theme_classic() +
+    coord_flip()
+
+
+# The same but with more detailed labels
+table(pred.fine$labels)
+plotScoreHeatmap(pred.fine)
+tab.fine <- table(Assigned=pred.fine$pruned.labels, Cluster=colLabels(sce.cell.types))
+Bcells <- tab.fine[grepl("B cell", rownames(tab.fine)), ]
+pheatmap(log2(Bcells+10), color=colorRampPalette(c("white", "blue"))(101))
+# a bit too messy, too many cell types, but we will add to colData just in case it might be useful afterwards
+colData(sce.cell.types)$celltype.fine <- pred.fine$pruned.labels
+
+saveRDS(sce.cell.types, "./processed_data/fourcore_sce.cell.types.rds")
+
+```
+# Add chromosome annotation to the sce
+###Pay attention this part of the code is also present on the filtering part, might be a repetition
+```{r Add chromosome annotation to the sce, echo=FALSE}
+
+# Add chromosome annotation to the sce
+library('AnnotationHub')
+ah <- AnnotationHub()
+query(ah, c("Mus musculus", "Ensembl", "v97"))
+ensdb <- ah[["AH73905"]]
+
+chromosome <- mapIds(ensdb,
+    keys = rownames(sce.cell.types),
+    keytype = "GENEID",
+    column = "SEQNAME")
+rowData(sce.cell.types)$chromosome <- chromosome
+rowData(sce.cell.types)
+```
+
