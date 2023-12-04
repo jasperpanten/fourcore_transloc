@@ -15,10 +15,12 @@ figures.
 
 ## scRNA-Seq of splenocytes
 The sc_rna_seq folder contains a snakemake workflow for cellranger-based alignment, and r scripts to assemble, filter
-and annotate the datasets. In the analysis folder,
+and annotate the datasets. In the analysis folder, there are scripts to perform differential expression analysis and
+generated the plots in the main figures, as well as code to generated all supplementary figures.
 
-## snRNA-Seq of splenocytes
-The 
+## snRNA-Seq of liver cells
+The preprocessing of sci-rnaseq on liver cells was done using the sci-rocket pipeline
+(https://github.com/odomlab2/sci-rocket/tree/main).
 
 ## Contact
 Jasper Panten (j.panten@dkfz-heidelberg.de)
