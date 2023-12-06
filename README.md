@@ -5,7 +5,7 @@ This repository contains all code to reproduce the results from the 4CG transloc
 ## Data availability
 
 All data is available at ArrayExpress under the accession numbers E-MTAB-13585 (whole genome sequencing data),
-E-MTAB-13586 (scRNA-Seq of splenocytes) and XXX (snRNA-Seq data of liver).
+E-MTAB-13586 (scRNA-Seq of splenocytes) and XXX (snRNA-Seq data of liver, accession pending).
 This includes raw read files, and per cell expression quantifications and filtered count matrices with cell type annotations.
 
 ## WGS data
@@ -20,7 +20,7 @@ generated the plots in the main figures, as well as code to generated all supple
 
 ## snRNA-Seq of liver cells
 The preprocessing of sci-rnaseq on liver cells was done using the sci-rocket pipeline
-(https://github.com/odomlab2/sci-rocket/tree/main).
+(https://github.com/odomlab2/sci-rocket/tree/main). The scripts to process the data and generate main and supplemental figures will be available shortly.
 
 ## Contact
 Jasper Panten (j.panten@dkfz-heidelberg.de)
