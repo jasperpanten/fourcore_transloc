@@ -5,7 +5,7 @@ This repository contains all code to reproduce the results from the 4CG transloc
 ## Data availability
 
 All data is available at ArrayExpress under the accession numbers E-MTAB-13585 (whole genome sequencing data),
-E-MTAB-13586 (scRNA-Seq of splenocytes) and E-MTAB-13700 (snRNA-Seq data of liver, accession pending).
+E-MTAB-13586 (scRNA-Seq of splenocytes) and E-MTAB-13700 (snRNA-Seq data of liver).
 This includes raw read files, and per cell expression quantifications and filtered count matrices with cell type annotations.
 
 ## WGS data
