@@ -1,0 +1,358 @@
+---
+title: "FCG Liver Differential Expression"
+author: "L. Saunders"
+date: "2023-10-13"
+output: html_document
+---
+
+```{r init_}
+
+# Import libraries ----
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(monocle3)
+  library(scir)
+  library(ggplot2)
+  library(data.table)
+  library(stringr)
+  library(plotly)
+  library(ggrepel)
+  library(DESeq2)
+  library(purrr)
+})
+  
+# Set plot theme.
+theme_paper <- function(textsize = 8){
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(colour = "black"),
+        panel.border = element_rect(colour = "black", fill=NA, size=1), 
+        text = element_text(size = textsize, color = "black"), 
+        axis.text = element_text(size = textsize, color = "black"), 
+        axis.ticks = element_line(colour = 'black', size = 1), 
+        axis.ticks.length = unit(.25, "cm"))
+}
+
+```
+
+## Import data
+
+```{r import_cds, eval=FALSE}
+# Import all samples.
+cds <- readRDS("../data/rdata/fcg_mess_grp-aligned_cds2.RDS")
+```
+
+## Pseudobulk data by individual mouse
+
+```{r make_pseudobulk_cds, eval=FALSE}
+
+# changed cell type to aligned, heps condensed in cell_type_group!! use `cell_type_group`
+
+# generate a new pseudobulk cds
+cell_type_by_ind <- colData(cds) %>% 
+  as.data.frame() %>% 
+  dplyr::select(cell, mouse_label, group, cell_type_group) %>% 
+  dplyr::distinct() %>%
+  dplyr::mutate(cell_type.animal = stringr::str_c(cell_type_group, mouse_label, sep="."))
+
+# unique(cell_type_by_ind$cell_type_broad) # check cell type conversion
+
+pseudobulk_df <- cell_type_by_ind %>% 
+  dplyr::select(cell, cell_type.animal)
+pseudobulk_df$cell <- rownames(pseudobulk_df)
+
+pseudobulk_matrix <- monocle3::aggregate_gene_expression(
+  cds, 
+  gene_group_df = NULL,
+  cell_group_df = pseudobulk_df,
+  norm_method="size_only",
+  pseudocount=0,
+  scale_agg_values = FALSE,
+  cell_agg_fun="sum")
+
+pseudobulk_pdata <- pseudobulk_df %>% 
+  group_by(cell_type.animal) %>% 
+  summarize(num_cells = n()) %>%
+  tidyr::separate(cell_type.animal, into = c("cell_type", "mouse_label"), 
+                  sep = "\\.", remove=FALSE, extra = "merge") %>%
+  dplyr::select(-mouse_label) %>% 
+  dplyr::distinct() %>%
+  as.data.frame()
+
+pseudobulk_metadata <- colData(cds) %>% 
+  as_tibble() %>%
+  dplyr::select(
+    mouse_label, 
+    group,
+    cell_type_group
+  ) %>% 
+  dplyr::mutate(cell_type.animal = stringr::str_c(cell_type_group, mouse_label, sep=".")) %>%
+  dplyr::distinct() 
+
+pseudobulk_pdata <- dplyr::inner_join(
+  pseudobulk_pdata, 
+  pseudobulk_metadata, 
+  by = "cell_type.animal"
+)
+
+row.names(pseudobulk_pdata) <- pseudobulk_pdata$cell_type.animal
+
+# harmonize cell type order
+pseudobulk_pdata <- pseudobulk_pdata[colnames(pseudobulk_matrix),]
+
+# make pseudobulk cds
+pseudobulk_cds <- new_cell_data_set(
+  pseudobulk_matrix,
+  gene_metadata = rowData(cds) %>% as.data.frame,
+  cell_metadata= pseudobulk_pdata
+)
+
+# filter out genes that aren't expressed
+pseudobulk_cds <- pseudobulk_cds[Matrix::rowSums(exprs(pseudobulk_cds)) != 0,]
+
+# Stayed the same -- all genes have one or more transcripts
+pseudobulk_cds <- estimate_size_factors(
+  pseudobulk_cds,
+  round_exprs = FALSE
+) %>% 
+  detect_genes()
+
+saveRDS(pseudobulk_cds, "../data/rdata/fcg_mess_aligned_pseudobulk_cds.RDS")
+```
+
+```{r load_pb_cds}
+
+pseudobulk_cds <- readRDS("../data/rdata/fcg_mess_aligned_pseudobulk_cds.RDS")
+
+# filter for celltypes to DE test
+pseudobulk_cds <- pseudobulk_cds[,colData(pseudobulk_cds)$cell_type_test %in% c("Hepatocyte", "Immune cell mixed", "Endothelial cell 1", "Hepatic Stellate Cell 1", "Kupffer cell", "Macrophage", "T cell")]
+
+# or
+
+pseudobulk_cds <- pseudobulk_cds[,colData(pseudobulk_cds)$cell_type_group %in% c("Hepatocyte", "Kupffer cell")]
+
+dim(pseudobulk_cds)
+
+```
+
+## DEG testing and plotting (multiple comparisons)
+
+```{r deseq_function}
+
+# function to convert pseudobulked cds into deseq object and run, for each celltype
+
+# set factors so that XY has positive effect
+colData(pseudobulk_cds)$group <- factor(colData(pseudobulk_cds)$group, levels = c("XYT", "XYO", "XXT", "XXO", "XYT-WT"))
+
+deseq_and_ma_plot <- function(pseudobulk_cds, cell_type, sel_groups, ref_grp){
+  
+  # list genes on duplicated region for plotting
+  dup_genes <- c("Tlr7", "Tlr8", "Tmsb4x", "Prps2", "Frmpd4", "Msl3", "Arhgap6", "Amelx", "Hccs")
+  
+  # filter cds for cell type and sex hormone
+  pb_filt_cds <- pseudobulk_cds[,colData(pseudobulk_cds)$cell_type == cell_type]
+  pb_filt_cds <- pb_filt_cds[,colData(pb_filt_cds)$group %in% sel_groups]
+  
+  # make DESeq dataset by group
+  dense_mat <- as.matrix(counts(pb_filt_cds))
+  mode(dense_mat) <- "integer"
+  
+  tmp = as.data.frame(colData(pb_filt_cds))
+  
+  dds <- DESeqDataSetFromMatrix(countData = dense_mat,
+                              colData = as.data.frame(colData(pb_filt_cds)),
+                              design = ~ group)
+  
+  # set reference level
+  dds$group <- stats::relevel(dds$group, ref = ref_grp)
+  
+  # process and run deseq
+  dds <- estimateSizeFactors(dds)
+  dds <- DESeq(dds)
+  test <- results(dds)
+  
+  rowData(pb_filt_cds) %>% 
+    as.data.frame() %>%
+    dplyr::select(id, gene_chr, "Gene" = gene_short_name) %>% 
+    tibble::rownames_to_column("long_id") -> gene_to_chromosome
+  
+  test %>% as.data.frame() %>% 
+    tibble::rownames_to_column("id") %>% 
+    left_join(gene_to_chromosome, by = c("id" = "long_id")) %>%
+    filter(!is.na(log2FoldChange)) %>%
+    dplyr::filter(gene_chr == "chrX") %>%
+    mutate(padj = p.adjust(pvalue)) %>%
+    mutate(FC = ifelse(abs(log2FoldChange) > 2, sign(log2FoldChange) * 2, log2FoldChange)) -> test_df
+  
+  test_df %>% 
+    filter(grepl("Tlr7", Gene))
+  
+  test_df %>%
+    dplyr::filter(baseMean > 10) %>% 
+    {
+      ggplot(., aes(x = baseMean, y = 2 ** FC, fill = padj < .1 & FC > 0)) + 
+        scale_x_log10() + 
+        scale_y_continuous(trans = "log2") + 
+        # ggrepel::geom_text_repel(data = . %>% dplyr::filter(padj < .1), aes(label = Gene)) + 
+        geom_hline(yintercept = 2, linetype = 'dashed', color = "red") + 
+        geom_point(pch = 21, size = 3) + 
+        geom_hline(yintercept = 1, color = "black") + 
+                ggrepel::geom_text_repel(data = . %>% dplyr::filter(Gene %in% dup_genes),
+                                         aes(label = Gene), size = 7, nudge_x = .15, nudge_y = .15) + 
+        scale_fill_manual(values = c("grey", "orange")) +
+        theme_paper(textsize = 30) + 
+        xlab("Expression level") + ylab(paste0(sel_groups[2], " / ", sel_groups[1], " (fold change)")) + 
+        theme(legend.position = "None")
+      
+      ggsave(paste0("../data/figures/", gsub(" ", "-", cell_type), "_" , sel_groups[1], "-", sel_groups[2], "_aligned_ma_plot.pdf"), 
+             width = 8, height = 8)
+  }
+}
+
+```
+
+```{r, deseq_testing}
+library(purrr)
+
+# select celltypes to test
+celltypes <- c("Hepatocyte", "Kupffer cell")
+
+# plot testes comparisons 
+plot_list_testes <- purrr::map(celltypes, 
+                             ~ deseq_and_ma_plot(pseudobulk_cds, 
+                                                 cell_type = ., sel_groups = c("XXT", "XYT")))
+
+# plot ovary comparisons
+plot_list_ovaries <- purrr::map(celltypes, 
+                             ~ deseq_and_ma_plot(pseudobulk_cds, 
+                                                 cell_type = ., sel_groups = c("XXO", "XYO")))
+
+```
+
+## DE testing: XYT vs. WTM - Supplemental Figure 4.
+
+```{r wtm_compare}
+
+celltypes <- c("Hepatocyte", "Kupffer cell")
+
+plot_list_xyt_wtm <- purrr::map(celltypes, 
+                             ~ deseq_and_ma_plot(pseudobulk_cds, 
+                                                 cell_type = ., 
+                                                 sel_groups = c("XYT", "XYT-WT"),
+                                                 ref_grp = "XYT-WT"))
+
+
+plot_list_xyo_wtm <- purrr::map(celltypes, 
+                             ~ deseq_and_ma_plot(pseudobulk_cds, 
+                                                 cell_type = ., 
+                                                 sel_groups = c("XYO", "XYT-WT"),
+                                                 ref_grp = "XYT-WT"))
+
+# need to switch label order on the Y-axis because the factor labels change here. 
+```
+
+## All gene DEA plots - supp fig 6
+
+```{r deseq_function_all-genes}
+
+# function to convert pseudobulked cds into deseq object and run, for each celltype
+
+deseq_and_ma_plot_all <- function(pseudobulk_cds, cell_type, sel_groups, ref_grp){
+  
+  # filter cds for cell type and sex hormone
+  pb_filt_cds <- pseudobulk_cds[,colData(pseudobulk_cds)$cell_type == cell_type]
+  pb_filt_cds <- pb_filt_cds[,colData(pb_filt_cds)$group %in% sel_groups]
+  
+  # make DESeq dataset by group
+  dense_mat <- as.matrix(counts(pb_filt_cds))
+  mode(dense_mat) <- "integer"
+  
+  dds <- DESeqDataSetFromMatrix(countData = dense_mat,
+                              colData = as.data.frame(colData(pb_filt_cds)),
+                              design = ~ group)
+  
+  # set reference level
+  dds$group <- stats::relevel(dds$group, ref = ref_grp)
+  
+  # process and run deseq
+  dds <- estimateSizeFactors(dds)
+  dds <- DESeq(dds)
+  test <- results(dds)
+  
+  rowData(pb_filt_cds) %>% 
+    as.data.frame() %>%
+    dplyr::select(id, gene_chr, "Gene" = gene_short_name) %>% 
+    tibble::rownames_to_column("long_id") -> gene_to_chromosome
+  
+  test %>% as.data.frame() %>% 
+    tibble::rownames_to_column("id") %>% 
+    left_join(gene_to_chromosome, by = c("id" = "long_id")) %>%
+    filter(!is.na(log2FoldChange)) %>%
+    dplyr::filter(baseMean > 50) %>%
+    mutate(padj = p.adjust(pvalue)) %>%
+    mutate(labelling = ifelse(padj > .1, "grey", case_when(
+      gene_chr == "chrX" ~ "X", 
+      gene_chr == "chrY" ~ "Y", 
+      .default = "Autosome"
+    ))) %>%
+    mutate(FC = ifelse(abs(log2FoldChange) > 2, sign(log2FoldChange) * 2, log2FoldChange)) -> test_df
+  
+  test_df %>%
+    dplyr::filter(baseMean > 10) %>% 
+    {
+      
+      ggplot(., aes(x = baseMean, y = FC, fill = labelling)) + 
+        geom_point(pch = 21, size = 2) + 
+        scale_x_log10() + 
+        ggrepel::geom_text_repel(data = . %>% dplyr::filter(padj < .1), 
+                                 aes(label = Gene), size = 8) + 
+        geom_hline(yintercept = 1, linetype = 'dashed', color = "red") +
+        scale_fill_manual(values = c("grey" =  "grey", "X" =  "red", Y = "green","Autosome" = "blue")) + 
+        theme_bw(base_size = 30) + 
+        xlab("Expression level") + ylab(paste0(sel_groups[2], " / ", sel_groups[1], " (fold change)")) + 
+        theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+              panel.border = element_rect(fill=NA, colour = "black", size=1)) +
+        theme(legend.position = "None")
+      
+      ggsave(paste0("../data/figures/", gsub(" ", "-", cell_type), "_" , sel_groups[1], "-", sel_groups[2], "_all-genes_ma_plot.pdf"), 
+             width = 8, height = 8)
+  }
+}
+
+
+```
+
+```{r, deseq_testing_all}
+library(purrr)
+
+# select celltypes to test
+celltypes <- c("Hepatocyte", "Kupffer cell")
+
+# plot testes comparisons 
+plot_list_testes <- purrr::map(celltypes, 
+                             ~ deseq_and_ma_plot_all(pseudobulk_cds, 
+                                                 cell_type = ., sel_groups = c("XXT", "XYT"), 
+                                                 ref_grp = "XXT"))
+
+# plot ovary comparisons
+plot_list_ovaries <- purrr::map(celltypes, 
+                             ~ deseq_and_ma_plot_all(pseudobulk_cds, 
+                                                 cell_type = ., sel_groups = c("XXO", "XYO"), 
+                                                 ref_grp = "XXO"))
+
+```
+
+### Expression of specific genes - Supp fig 8.
+
+```{r gene_expr_boxplots}
+
+fcg_cols <- c("XXO" = "#000000", 
+              "XXT" = "#6F6F6E",
+              "XYO" = "#B1B1B1",
+              "XYT" = "#ECECEC",
+              "XYT-WT" = "#DBC6A9")
+
+
+```
+
