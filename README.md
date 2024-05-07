@@ -20,7 +20,7 @@ generated the plots in the main figures, as well as code to generated all supple
 
 ## snRNA-Seq of liver cells
 The preprocessing of sci-rnaseq on liver cells was done using the sci-rocket pipeline
-(https://github.com/odomlab2/sci-rocket/tree/main). The scripts to process the data and generate main and supplemental figures will be available shortly.
+(https://github.com/odomlab2/sci-rocket/tree/main). The sn_rna_seq folder contains the scripts used to process the data and generate main and supplemental figures.
 
 ## Contact
 Jasper Panten (j.panten@dkfz-heidelberg.de)
