@@ -1,0 +1,80 @@
+#!/bin/python
+
+import pandas as pd
+import numpy as np
+import os
+import pdb
+
+# For debugging
+# pdb.set_trace()
+
+# Call as 
+# /home/panten/miniconda3/bin/snakemake -s snakefile --cluster "bsub -n16 -q verylong -R rusage[mem=200GB]"
+# -j30 --use-envmodules -n
+
+# Define parent dir
+parent_dir = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/"
+
+# Define temporary dir 
+temp_dir = parent_dir + "tmp/"
+
+# Give paths to references (could be in config)
+reference_genome = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/bowtie_n_masked/mm39_n_masked"
+reference_fastq = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/n_masked_genome/mm39.removechr.fa"
+
+# Output folder
+output_dir = parent_dir + "output/wgs_ont/"
+data_dir = parent_dir + "./data/wgs_ont/data/linked/"
+
+samples = ["20231010_1218_X1_FAW23490_dc839b23", "20231107_1443_2F_PAS23281_32f1bc8b", "20231107_1557_3H_PAS26449_09d1afc1"]
+
+all_targets = [ output_dir + i + "/aligned/" + i + "_aligned.bam" for i in sample_list ]
+
+print(all_targets)
+
+rule all:
+    input:
+        all_targets,
+        all_targets_fail
+
+# Create a folder linked_files, create one folder per sample in there which contains links to all sample fastqs
+rule merge_fastqs_fail:
+    input: data_dir + "{sample}"
+    output: output_dir + "{sample}/reads/{sample}_fail_merged.fastq.gz"
+    shell:
+        """
+        zcat {input}/fastq_fail/*.fastq.gz | gzip -c > {output}
+        """
+
+rule merge_fastqsa_pass:
+    input: data_dir + "{sample}"
+    output: output_dir + "{sample}/reads/{sample}_merged.fastq.gz"
+    shell:
+        """
+        zcat {input}/fastq_pass/*.fastq.gz | gzip -c > {output}
+        """
+
+rule align_reads:
+    input: output_dir + "{sample}/reads/{sample}_merged.fastq.gz"
+    output: output_dir + "{sample}/aligned/{sample}_aligned.sam"
+    params:
+        ref_fastq = reference_fastq
+    envmodules:
+        "minimap2/2.24",
+        "samtools/1.15.1"
+    shell:
+        """
+        minimap2 -t 8 -a -x map-ont {params.ref_fastq} {input} > {output}
+        """
+
+rule process_sam:
+    input: output_dir + "{sample}/aligned/{sample}_aligned.sam"
+    output: output_dir + "{sample}/aligned/{sample}_aligned.bam"
+    envmodules:
+        "samtools/1.15.1"
+    shell:
+        """
+        samtools sort -o {input}.sorted {input}
+        samtools view -bS {input}.sorted > {output}
+        samtools index {output}
+        """

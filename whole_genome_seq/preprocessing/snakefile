@@ -5,41 +5,63 @@ import numpy as np
 import os
 import pdb
 
+# For debugging
+# pdb.set_trace()
+
+# Call as 
+# /home/panten/miniconda3/bin/snakemake -s snakefile --cluster "bsub -n16 -q verylong -R rusage[mem=200GB]"
+# -j30 --use-envmodules -n
+
 # Define parent dir
-parent_dir = os.path.dirname(__file__)
+parent_dir = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/"
 
 # Define temporary dir 
 temp_dir = parent_dir + "tmp/"
 
-# Give paths to references
-reference_genome = parent_dir + "/genome_files/mm39_n_masked"
-ref_fasta = parent_dir + "/genome_files/n_masked_genome/mm39.removechr.fa"
-chr_sizes = parent_dir + "/genome_files/n_masked_genome_sizes.genome/"
-snp_file = parent_dir + "/genome_files/all_SNPs_CAST_EiJ_GRCm38.txt.gz"
+# Give paths to references (could be in config)
+reference_genome = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/bowtie_n_masked/mm39_n_masked"
+ref_fasta = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/n_masked_genome/mm39.removechr.fa"
+chr_sizes="/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/n_masked_genome/sizes.genome"
+snp_file = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/SNPs_CAST_EiJ/"
+snp_file = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/all_SNPs_CAST_EiJ_GRCm38.txt.gz"
 
 # Output folder
 output_dir = parent_dir + "output/"
 
-# Give the paths to the data files - the data should be placed in this directory
-data_dir = "data/"
+# Give the paths to the data files
+data_dir_1 = "data/230909_VH00211_290_AAC7GHNHV/"
+data_dir_2 = "data/231007_VH00211_304_AAF3G2VM5/"
+data_dir_3 = "data/231026_VH00211_307_AAC5V7JHV/"
+data_dir_4 = "data/231215_VH00211_314_AAC5TYTHV/"
 
-# Read the sample information from metadata files
-metadata = pd.read_csv(parent_dir + "metadata.csv")
+# Read the sample information as exported from the ODCF database image
 
-sample_list = [i for i in metadata.Sample]
-data_path_per_sample = { i : "" }
+metadata_1 = pd.read_csv(parent_dir + "/data/wgs/metadata.csv")
+metadata_2 = pd.read_csv(parent_dir + "/data/wgs/metadata_2.csv")
+metadata_3 = pd.read_csv(parent_dir + "/data/wgs/metadata_3.csv")
+metadata_4 = pd.read_csv(parent_dir + "/data/wgs/metadata_4.csv")
 
-# Define final targets for rule all
+#metadata = pd.read_csv(parent_dir + "data/metadata_test.csv")
+sample_list_lane1 = [i for i in metadata_1.Sample]
+sample_list_lane2 = [i for i in metadata_2.Sample]
+sample_list_lane3 = [i for i in metadata_3.Sample]
+sample_list_lane4 = [i for i in metadata_4.Sample]
+
+sample_list = np.concatenate([sample_list_lane1, sample_list_lane2, sample_list_lane3, sample_list_lane4])
+data_path_per_sample = { i : "230909_VH00211_290_AAC7GHNHV" for i in sample_list_lane1 } | { i :
+"231007_VH00211_304_AAF3G2VM5" for i in sample_list_lane2} | {i : "231026_VH00211_307_AAC5V7JHV" for i in
+        sample_list_lane3} | { i : "231215_VH00211_314_AAC5TYTHV" for i in sample_list_lane4 }
+
 all_targets = [ output_dir + i + "/aligned/" + i + ".sorted.markdup.resorted.genome1.bam" for i in sample_list ]
+
+print(all_targets)
 
 rule all:
     input:
         expand(output_dir + "{sample}/aligned/{sample}.sorted.markdup.resorted.{genome}.bam", genome = ["genome1",
             "genome2"], sample = sample_list)
 
-
-
-# Link fastq files
+# Create a folder linked_files, create one folder per sample in there which contains links to all sample fastqs
 rule link_file1:
     output: output_dir + "{sample}/reads/{sample}_R1.fastq.gz"
     params: 
@@ -61,7 +83,6 @@ rule link_file2:
         ln -sf {params.fastq_input_file} {output}
         """
 
-# Run read trimming using trim_galore
 rule trim_reads:
     input:
         read1 = output_dir + "{sample}/reads/{sample}_R1.fastq.gz",
@@ -84,7 +105,6 @@ rule trim_reads:
             {input.read1} {input.read2}
         """
 
-# Run read alignment using bowtie2
 rule align_reads:
     input:
         read1 = output_dir + "{sample}/trimmed/{sample}_R1_val_1.fq.gz",
@@ -102,7 +122,6 @@ rule align_reads:
         bowtie2 -p 10 -x {params.genome} -1 {input.read1} -2 {input.read2} -S {output}
         """
 
-# Process sam output into sorted bam
 rule process_bam:
     input: output_dir + "{sample}/aligned/{sample}.sam"
     output: output_dir + "{sample}/aligned/{sample}.sorted.bam"
@@ -115,7 +134,6 @@ rule process_bam:
         samtools index {output}
         """
 
-# Deduplicate using samtools markdup
 rule markdups:
     input: output_dir + "{sample}/aligned/{sample}.sorted.bam"
     output: output_dir + "{sample}/aligned/{sample}.sorted.markdup.bam"
@@ -135,7 +153,6 @@ rule markdups:
         samtools index {output}
         """
 
-# Use SNPsplit to partition reads into B6 and CAST genotypes
 rule snpsplit:
     input: output_dir + "{sample}/aligned/{sample}.sorted.markdup.bam"
     output: expand(output_dir + "{{sample}}/aligned/{{sample}}.sorted.markdup.{genotype}.bam", genotype=["genome1", "genome2", "unassigned"])
@@ -152,7 +169,6 @@ rule snpsplit:
             {input}
         """
 
-# Process allelic bams
 rule process_allelic_bam:
         input: output_dir + "{sample}/aligned/{sample}.sorted.markdup.{genotype}.bam"
         output: output_dir + "{sample}/aligned/{sample}.sorted.markdup.resorted.{genotype}.bam"
