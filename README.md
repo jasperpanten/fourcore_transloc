@@ -5,13 +5,13 @@ This repository contains all code to reproduce the results from the 4CG transloc
 ## Data availability
 
 All data is available at ArrayExpress under the accession numbers E-MTAB-13585 (whole genome sequencing data),
-E-MTAB-13586 (scRNA-Seq of splenocytes) and E-MTAB-13700 (snRNA-Seq data of liver).
+E-MTAB-14291 (whole genome long read sequencing data), E-MTAB-13586 (scRNA-Seq of splenocytes) and E-MTAB-13700 (snRNA-Seq data of liver).
 This includes raw read files, and per cell expression quantifications and filtered count matrices with cell type annotations.
 
 ## WGS data
 The whole_genome_seq folder contains a snakemake workflow for alignment and deduplication. Furthermore, it contains a
 script containing code to generate coverage quantifications including allele-specific signals and code to generate all
-figures.
+figures. The whole_genome_seq_ont folder contains a snakemake workflow to align the nanopore data.
 
 ## scRNA-Seq of splenocytes
 The sc_rna_seq folder contains a snakemake workflow for cellranger-based alignment, and r scripts to assemble, filter
