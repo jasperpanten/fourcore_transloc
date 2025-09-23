@@ -1,6 +1,6 @@
 ## Four-Core Genotypes mice harbour a 3.2MB X-Y translocation that perturbs Tlr7 dosage
 
-This repository contains all code to reproduce the results from the 4CG translocation preprint. 
+This repository contains all code to reproduce the results from the 4CG translocation paper. 
 
 ## Data availability
 
