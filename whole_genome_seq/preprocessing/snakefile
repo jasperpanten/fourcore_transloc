@@ -19,11 +19,11 @@ parent_dir = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess
 temp_dir = parent_dir + "tmp/"
 
 # Give paths to references (could be in config)
-reference_genome = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/bowtie_n_masked/mm39_n_masked"
-ref_fasta = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/n_masked_genome/mm39.removechr.fa"
-chr_sizes="/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/n_masked_genome/sizes.genome"
-snp_file = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/SNPs_CAST_EiJ/"
-snp_file = "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/genome_files/all_SNPs_CAST_EiJ_GRCm38.txt.gz"
+reference_genome = "./genome_files/bowtie_n_masked/mm39_n_masked"
+ref_fasta = "./genome_files/n_masked_genome/mm39.removechr.fa"
+chr_sizes="./genome_files/n_masked_genome/sizes.genome"
+snp_file = "./genome_files/SNPs_CAST_EiJ/"
+snp_file = "./genome_files/all_SNPs_CAST_EiJ_GRCm38.txt.gz"
 
 # Output folder
 output_dir = parent_dir + "output/"
