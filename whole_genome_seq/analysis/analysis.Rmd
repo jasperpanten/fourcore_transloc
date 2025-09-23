@@ -14,8 +14,6 @@ knitr::opts_chunk$set(warning=FALSE, message=FALSE)
 
 ```{r asdasdas}
 
-setwd("/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/")
-
 library(GenomicRanges)
 library(Rsamtools)
 library(bamsignals)
@@ -79,14 +77,14 @@ name_conversion <- list(
 
 ```
 
-This script generates all figures for XXX. 
+This script generates all figures.
 
 We first perform some general QC on the whole genome datasets and look at the number of sequenced reads and the duplication rate: 
 
 ```{r read_stats}
 
 #samples <- c("downsampled")
-samples <- list.dirs("/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/output/", recursive = F, full.names = F)
+samples <- list.dirs("./output/", recursive = F, full.names = F)
 # samples <- samples[!samples %in% c("AS-1074016-LR-69532", "downsampled")]
 # samples <- samples[!samples %in% c("AS-1096362-LR-69717", "AS-1096364-LR-69717", "downsampled", "run_manta", "rnaseq")]
 # samples <- samples[grepl("(-LR-69532)|(-LR-69717)|(-LR-69823)", samples)]
@@ -176,7 +174,7 @@ We next look at the genome-wide coverage in 1mb windows:
 #            core = 10, hour = 5, {
 # 
 #           #samples <- c("AS-1074014-LR-69532")
-#           samples <- list.dirs("/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/output/",
+#           samples <- list.dirs("./output/",
 #                                recursive = F, full.names = F)
 #           # samples <- samples[samples != "AS-1074016-LR-69532"]
 #           # samples <- c("AS-1108622-LR-69823")
@@ -185,7 +183,7 @@ We next look at the genome-wide coverage in 1mb windows:
 # 
 #           binsize = 1e6
 # 
-#           parent_dir <- "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/"
+#           parent_dir <- "./"
 # 
 #           sample_paths_deduplicated <- paste0(parent_dir, sample_paths_deduplicated)
 # 
@@ -353,7 +351,7 @@ Now we zoom into the X / Y with 1kb resolution:
 # bsub_chunk(name = 'compute_coverages_xy', packages = c('GenomicRanges', 'Rsamtools', 'bamsignals', 'tidyverse', 'GenomicFeatures'), memory = 100,
 #            core = 10, hour = 5, {
 # 
-#           samples <- list.dirs("/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/output/",
+#           samples <- list.dirs("./output/",
 #                                recursive = F, full.names = F)
 #           samples <- samples[grepl("70335", samples)]
 # 
@@ -361,7 +359,7 @@ Now we zoom into the X / Y with 1kb resolution:
 # 
 #           binsize = 1e3
 # 
-#           parent_dir <- "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/"
+#           parent_dir <- "./"
 # 
 #           sample_paths_deduplicated <- paste0(parent_dir, sample_paths_deduplicated)
 # 
@@ -655,14 +653,14 @@ ggplot2::ggsave("./plots/wgs/assignable_reads_exp1.pdf", width = 16, height = 12
 #            core = 10, hour = 5, {
 #              
 #           #samples <- c("AS-1074014-LR-69532")
-#           samples <- list.dirs("/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/output/", recursive = F, full.names = F)
+#           samples <- list.dirs("./output/", recursive = F, full.names = F)
 #           samples <- samples[grepl("AS-", samples)]
 #           sample_paths_deduplicated_g1 <- paste0("./output/", samples, "/aligned/", samples, ".sorted.markdup.genome1.bam")
 #           sample_paths_deduplicated_g2 <- paste0("./output/", samples, "/aligned/", samples, ".sorted.markdup.genome2.bam")
 #              
 #           binsize = 1e3
 #           
-#           parent_dir <- "/omics/odcf/analysis/OE0538_projects/DO-0009/f1_mcas_b6/4core_mess/"
+#           parent_dir <- "./"
 #           
 #           sample_paths_deduplicated_g1 <- paste0(parent_dir, sample_paths_deduplicated_g1)
 #           sample_paths_deduplicated_g2 <- paste0(parent_dir, sample_paths_deduplicated_g2)
